@@ -12,6 +12,10 @@ loom {
 			sourceSet sourceSets.main
 		}
 	}
+	// ESTO ES LO QUE FALTABA:
+	mixin {
+		defaultRefmapName = "perro_cazador.refmap.json"
+	}
 }
 
 dependencies {
