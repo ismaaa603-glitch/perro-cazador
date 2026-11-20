@@ -3,7 +3,8 @@
   "package": "com.perrocazador.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
-    "TamableAnimalMixin"
+    "TamableAnimalMixin",
+    "WolfMixin"
   ],
   "injectors": {
     "defaultRequire": 1
