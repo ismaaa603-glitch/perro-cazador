@@ -1,11 +1,16 @@
 package com.perrocazador;
 
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
 import net.minecraft.network.chat.Component;
@@ -14,16 +19,18 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.ExperienceOrb;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.TamableAnimal;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.phys.Vec3;
 
 /**
  * Perro Cazador: solo los lobos domados que tu marques (agachado + clic derecho con un hueso)
- * cazan animales de granja cerca de ti y te entregan el botin y algo de experiencia.
+ * cazan animales de granja cerca de ti y te traen el botin y la experiencia y los sueltan a tus pies.
  */
 public class PerroCazadorMod implements ModInitializer {
 	public static final String HUNTER_TAG = "perro_cazador";
@@ -36,6 +43,21 @@ public class PerroCazadorMod implements ModInitializer {
 	private static final double SEARCH_RADIUS = 2000.0;
 	private static final double FOLLOW_RANGE = 128.0; // hasta donde puede trazar ruta el perro
 	private static final int CHECK_INTERVAL = 20; // ticks
+	private static final double DELIVER_DISTANCE = 3.0; // bloques: a esta distancia del dueno suelta el botin
+	private static final int DELIVER_TIMEOUT = 1200; // ticks (60 s): si no llega, suelta el botin donde este
+
+	/** Botin que cada perro lleva encima hasta entregarlo (clave: UUID del perro). */
+	private static final Map<UUID, Pending> PENDING = new HashMap<>();
+
+	private static final class Pending {
+		final List<ItemStack> items = new ArrayList<>();
+		int xp;
+		final long startTick;
+
+		Pending(long startTick) {
+			this.startTick = startTick;
+		}
+	}
 
 	@Override
 	public void onInitialize() {
@@ -76,6 +98,12 @@ public class PerroCazadorMod implements ModInitializer {
 		});
 
 		ServerLivingEntityEvents.AFTER_DEATH.register((victim, source) -> {
+			// Si muere un perro que llevaba botin, lo suelta donde muere.
+			Pending carried = PENDING.remove(victim.getUUID());
+			if (carried != null && victim.level() instanceof ServerLevel deathLevel) {
+				dropPending(deathLevel, victim, carried, null);
+			}
+
 			if (!PREY.contains(victim.getType())) {
 				return;
 			}
@@ -83,11 +111,26 @@ public class PerroCazadorMod implements ModInitializer {
 			if (!(killer instanceof TamableAnimal dog) || !dog.getTags().contains(HUNTER_TAG)) {
 				return;
 			}
-			if (!(dog.getOwner() instanceof ServerPlayer owner) || !(victim.level() instanceof ServerLevel level)) {
+			if (!(victim.level() instanceof ServerLevel level)) {
 				return;
 			}
-			deliverLoot(level, victim, owner);
-			owner.giveExperiencePoints(1 + owner.getRandom().nextInt(3));
+			Pending pending = PENDING.computeIfAbsent(dog.getUUID(), k -> new Pending(level.getServer().getTickCount()));
+			collectLoot(level, victim, pending);
+			pending.xp += 1 + dog.getRandom().nextInt(3);
+		});
+
+		// Al cerrar el mundo, que nadie pierda el botin que llevaba el perro.
+		ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
+			for (Map.Entry<UUID, Pending> entry : new ArrayList<>(PENDING.entrySet())) {
+				for (ServerLevel level : server.getAllLevels()) {
+					Entity dog = level.getEntity(entry.getKey());
+					if (dog != null) {
+						dropPending(level, dog, entry.getValue(), null);
+						break;
+					}
+				}
+			}
+			PENDING.clear();
 		});
 	}
 
@@ -107,6 +150,18 @@ public class PerroCazadorMod implements ModInitializer {
 					dog.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE);
 			if (range != null && range.getBaseValue() < FOLLOW_RANGE) {
 				range.setBaseValue(FOLLOW_RANGE);
+			}
+			// Si lleva botin, va hacia ti y lo suelta; no caza hasta entregarlo.
+			Pending pending = PENDING.get(dog.getUUID());
+			if (pending != null) {
+				long waited = level.getServer().getTickCount() - pending.startTick;
+				if (tamable.isOrderedToSit() || waited > DELIVER_TIMEOUT || dog.distanceTo(player) < DELIVER_DISTANCE) {
+					PENDING.remove(dog.getUUID());
+					dropPending(level, dog, pending, player);
+				} else {
+					dog.getNavigation().moveTo(player, 1.3);
+				}
+				continue;
 			}
 			if (tamable.isOrderedToSit()) {
 				continue;
@@ -140,17 +195,30 @@ public class PerroCazadorMod implements ModInitializer {
 		}
 	}
 
-	private static void deliverLoot(ServerLevel level, LivingEntity victim, ServerPlayer owner) {
+	/** El perro "recoge" los drops de la presa: se quitan del suelo y se guardan para entregarlos. */
+	private static void collectLoot(ServerLevel level, LivingEntity victim, Pending pending) {
 		List<ItemEntity> drops = level.getEntitiesOfClass(ItemEntity.class,
 				victim.getBoundingBox().inflate(3.0),
 				item -> item.isAlive() && item.tickCount < 20);
 		for (ItemEntity drop : drops) {
-			ItemStack stack = drop.getItem().copy();
+			pending.items.add(drop.getItem().copy());
 			drop.discard();
-			owner.getInventory().add(stack);
-			if (!stack.isEmpty()) {
-				owner.drop(stack, false);
+		}
+	}
+
+	/** Suelta el botin (y la XP como orbes) en la posicion del perro, empujando los items hacia el dueno. */
+	private static void dropPending(ServerLevel level, Entity dog, Pending pending, Entity owner) {
+		for (ItemStack stack : pending.items) {
+			ItemEntity drop = new ItemEntity(level, dog.getX(), dog.getY() + 0.5, dog.getZ(), stack);
+			drop.setDefaultPickUpDelay();
+			if (owner != null) {
+				Vec3 push = owner.position().subtract(dog.position()).multiply(1.0, 0.0, 1.0).normalize().scale(0.15);
+				drop.setDeltaMovement(push.x, 0.2, push.z);
 			}
+			level.addFreshEntity(drop);
+		}
+		if (pending.xp > 0) {
+			ExperienceOrb.award(level, dog.position(), pending.xp);
 		}
 	}
 }
