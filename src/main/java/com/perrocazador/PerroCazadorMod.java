@@ -169,6 +169,9 @@ public class PerroCazadorMod implements ModInitializer {
 	private static void tickPlayer(ServerPlayer player) {
 		ServerLevel level = (ServerLevel) player.level();
 		long now = level.getServer().getTickCount();
+		// Solo caza dentro de TUS chunks activos (distancia de simulacion menos un margen).
+		double huntRange = Math.max(32.0,
+				(level.getServer().getPlayerList().getSimulationDistance() - 2) * 16.0);
 		List<Mob> dogs = level.getEntitiesOfClass(Mob.class,
 				player.getBoundingBox().inflate(SEARCH_RADIUS),
 				e -> e instanceof TamableAnimal t
@@ -224,7 +227,7 @@ public class PerroCazadorMod implements ModInitializer {
 						dropPending(level, dog, pending, player);
 					} else {
 						dog.setTarget(null);
-						dog.getNavigation().moveTo(player, 1.3);
+						walkToward(dog, player, 1.3);
 					}
 					continue;
 				}
@@ -240,12 +243,19 @@ public class PerroCazadorMod implements ModInitializer {
 				continue;
 			}
 
+			// Si se ha salido de tus chunks activos, vuelve hacia ti en vez de cazar.
+			if (dog.distanceTo(player) > huntRange) {
+				walkToward(dog, player, 1.3);
+				continue;
+			}
+
 			Mob prey = level.getEntitiesOfClass(Mob.class,
-					dog.getBoundingBox().inflate(OWNER_RADIUS),
+					player.getBoundingBox().inflate(huntRange),
 					e -> PREY.contains(e.getType())
 							&& e.isAlive()
 							&& !e.isBaby()
 							&& !e.hasCustomName()
+							&& e.distanceTo(player) <= huntRange
 							&& e != dog)
 					.stream()
 					.min(Comparator.comparingDouble(e -> e.distanceToSqr(dog)))
@@ -285,7 +295,20 @@ public class PerroCazadorMod implements ModInitializer {
 	/** Seguir al dueno andando (sin teletransporte) cuando no hay nada que cazar. */
 	private static void followOnFoot(Mob dog, ServerPlayer player) {
 		if (dog.distanceTo(player) > IDLE_RETURN_DISTANCE) {
-			dog.getNavigation().moveTo(player, 1.2);
+			walkToward(dog, player, 1.2);
+		}
+	}
+
+	/** Camina hacia el jugador; si esta lejos, por tramos de ~40 bloques (la ruta larga falla pasado el rango de seguimiento). */
+	private static void walkToward(Mob dog, ServerPlayer player, double speed) {
+		double dist = dog.distanceTo(player);
+		if (dist <= 48.0) {
+			dog.getNavigation().moveTo(player, speed);
+			return;
+		}
+		Vec3 dir = player.position().subtract(dog.position()).multiply(1.0, 0.0, 1.0).normalize().scale(40.0);
+		if (!dog.getNavigation().moveTo(dog.getX() + dir.x, player.getY(), dog.getZ() + dir.z, speed)) {
+			dog.getNavigation().moveTo(player, speed);
 		}
 	}
 
