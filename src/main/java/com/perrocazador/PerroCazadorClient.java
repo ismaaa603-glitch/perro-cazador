@@ -2,6 +2,7 @@ package com.perrocazador;
 
 import java.util.List;
 
+import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
@@ -17,7 +18,7 @@ import org.lwjgl.glfw.GLFW;
 public class PerroCazadorClient implements ClientModInitializer {
 
 	private static volatile List<DogsPayload.Entry> dogs = List.of();
-	private static boolean wasPressed = false; // Para que no se envíe el paquete 20 veces por segundo
+	private static boolean wasPressed = false;
 
 	@Override
 	public void onInitializeClient() {
@@ -27,15 +28,18 @@ public class PerroCazadorClient implements ClientModInitializer {
 		HudRenderCallback.EVENT.register(PerroCazadorClient::render);
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
-			if (client.player == null) return;
+			if (client.player == null || client.screen != null) {
+				wasPressed = false; // Si abres el chat o el inventario, se resetea
+				return;
+			}
 
-			// Comprobar si la tecla 'ñ' (Semicolon) está siendo pulsada en la ventana de Minecraft
-			long windowHandle = client.getWindow().getWindow();
-			boolean isPressed = GLFW.glfwGetKey(windowHandle, GLFW.GLFW_KEY_SEMICOLON) == GLFW.GLFW_PRESS;
+			// Usar InputConstants de Mojang, que es la API oficial y no falla
+			boolean isPressed = InputConstants.isKeyDown(
+					client.getWindow().getWindow(), 
+					GLFW.GLFW_KEY_SEMICOLON
+			);
 
-			// Si se acaba de pulsar y no hay ninguna pantalla abierta (como el chat o el inventario)
-			if (isPressed && !wasPressed && client.screen == null) {
-				// Solo funciona si tienes un hueso en la mano principal o secundaria
+			if (isPressed && !wasPressed) {
 				if (client.player.getMainHandItem().is(Items.BONE) || client.player.getOffhandItem().is(Items.BONE)) {
 					ClientPlayNetworking.send(new RecallPayload());
 				}
