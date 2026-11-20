@@ -64,7 +64,7 @@ public class PerroCazadorMod implements ModInitializer {
 
 	/** Mision que se activa con clic derecho al perro con el objeto indicado. */
 	private enum Mission {
-		ENDERMAN(EntityType.ENDERMAN, Items.Items.ENDER_PEARL, Items.ENDER_PEARL, "endermans"),
+		ENDERMAN(EntityType.ENDERMAN, Items.ENDER_PEARL, Items.ENDER_PEARL, "endermans"),
 		PIG(EntityType.PIG, Items.PORKCHOP, Items.PORKCHOP, "cerdos"),
 		SHEEP(EntityType.SHEEP, Items.MUTTON, Items.MUTTON, "ovejas");
 
