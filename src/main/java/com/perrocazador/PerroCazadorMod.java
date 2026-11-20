@@ -16,9 +16,13 @@ import net.fabricmc.fabric.api.event.player.UseEntityCallback;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.NbtOps;
+import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.RegistryOps;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.ProblemReporter;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
@@ -27,11 +31,13 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.FollowOwnerGoal;
 import net.minecraft.world.entity.ai.goal.GoalSelector;
-import net.minecraft.world.entity.animal.Wolf;
+import net.minecraft.world.entity.animal.wolf.Wolf;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.storage.TagValueInput;
+import net.minecraft.world.level.storage.TagValueOutput;
 import net.minecraft.world.phys.Vec3;
 
 public class PerroCazadorMod implements ModInitializer {
@@ -66,13 +72,15 @@ public class PerroCazadorMod implements ModInitializer {
 		}
 
 		public void saveToNbt(CompoundTag tag, HolderLookup.Provider registries) {
+			RegistryOps<Tag> ops = registries.createSerializationContext(NbtOps.INSTANCE);
+
 			CompoundTag data = new CompoundTag();
 			data.putInt("XP", xp);
 			data.putBoolean("Returning", returningToOwner);
-			
+
 			ListTag list = new ListTag();
 			for (ItemStack stack : items) {
-				list.add(stack.save(registries, new CompoundTag()));
+				ItemStack.CODEC.encodeStart(ops, stack).result().ifPresent(list::add);
 			}
 			data.put("Items", list);
 			tag.put("PerroCazadorData", data);
@@ -80,14 +88,18 @@ public class PerroCazadorMod implements ModInitializer {
 
 		public static Pending loadFromNbt(CompoundTag tag, HolderLookup.Provider registries) {
 			if (!tag.contains("PerroCazadorData")) return null;
-			CompoundTag data = tag.getCompound("PerroCazadorData");
-			Pending pending = new Pending();
-			pending.xp = data.getInt("XP");
-			pending.returningToOwner = data.getBoolean("Returning");
+			RegistryOps<Tag> ops = registries.createSerializationContext(NbtOps.INSTANCE);
 
-			ListTag list = data.getList("Items", 10);
+			CompoundTag data = tag.getCompoundOrEmpty("PerroCazadorData");
+			Pending pending = new Pending();
+			pending.xp = data.getIntOr("XP", 0);
+			pending.returningToOwner = data.getBooleanOr("Returning", false);
+
+			ListTag list = data.getListOrEmpty("Items");
 			for (int i = 0; i < list.size(); i++) {
-				ItemStack.parse(registries, list.getCompound(i)).ifPresent(pending.items::add);
+				list.getCompound(i)
+						.flatMap(t -> ItemStack.CODEC.parse(ops, t).result())
+						.ifPresent(pending.items::add);
 			}
 			return pending;
 		}
@@ -187,9 +199,20 @@ public class PerroCazadorMod implements ModInitializer {
 		});
 	}
 
+	/** Vuelca el estado actual de la entidad a un CompoundTag (API ValueOutput de 1.21.6+). */
+	private static CompoundTag saveEntity(Wolf dog, HolderLookup.Provider registries) {
+		TagValueOutput output = TagValueOutput.createWithContext(ProblemReporter.DISCARDING, registries);
+		dog.saveWithoutId(output);
+		return output.buildResult();
+	}
+
+	/** Carga un CompoundTag en la entidad (API ValueInput de 1.21.6+). */
+	private static void loadEntity(Wolf dog, CompoundTag tag, HolderLookup.Provider registries) {
+		dog.load(TagValueInput.create(ProblemReporter.DISCARDING, registries, tag));
+	}
+
 	private static void syncFromEntity(Wolf dog, HolderLookup.Provider registries) {
-		CompoundTag tag = new CompoundTag();
-		dog.saveWithoutId(tag);
+		CompoundTag tag = saveEntity(dog, registries);
 		Pending pending = Pending.loadFromNbt(tag, registries);
 		if (pending != null) {
 			PENDING.put(dog.getUUID(), pending);
@@ -199,21 +222,19 @@ public class PerroCazadorMod implements ModInitializer {
 	}
 
 	private static void syncToEntity(Wolf dog, Pending pending, HolderLookup.Provider registries) {
-		CompoundTag tag = new CompoundTag();
-		dog.saveWithoutId(tag);
+		CompoundTag tag = saveEntity(dog, registries);
 		if (pending != null && !pending.items.isEmpty()) {
 			pending.saveToNbt(tag, registries);
 		} else {
 			tag.remove("PerroCazadorData");
 		}
-		dog.load(tag);
+		loadEntity(dog, tag, registries);
 	}
 
 	private static void clearEntityNbt(Wolf dog, HolderLookup.Provider registries) {
-		CompoundTag tag = new CompoundTag();
-		dog.saveWithoutId(tag);
+		CompoundTag tag = saveEntity(dog, registries);
 		tag.remove("PerroCazadorData");
-		dog.load(tag);
+		loadEntity(dog, tag, registries);
 	}
 
 	private static void tickPlayerDogs(ServerPlayer player) {
