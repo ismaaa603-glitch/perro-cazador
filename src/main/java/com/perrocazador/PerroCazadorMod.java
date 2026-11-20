@@ -43,13 +43,17 @@ public class PerroCazadorMod implements ModInitializer {
 
 	private static final Set<EntityType<?>> PREY = Set.of(EntityType.PIG, EntityType.SHEEP);
 
-	private static final int RENDER_CHUNKS = 6;
-	private static final double HUNT_RADIUS = RENDER_CHUNKS * 16 - 16;
-	private static final double LEASH_DISTANCE = 88.0;
+	// --- DISTANCIAS AJUSTADAS ---
+	// Radio de búsqueda: 128 bloques (8 chunks)
+	private static final double HUNT_RADIUS = 128.0; 
+	
+	// Distancia de teletransporte: 144 bloques (mayor que el radio de búsqueda para que pueda perseguir presas lejanas)
+	private static final double LEASH_DISTANCE = 144.0; 
+	
 	private static final double TELEPORT_MIN = 8.0;
 	private static final double TELEPORT_MAX = 12.0;
 
-	private static final double FOLLOW_RANGE = 128.0;
+	private static final double FOLLOW_RANGE = 160.0; // Aumentado también para que la IA siga funcionando bien a esa distancia
 	private static final double DELIVER_DISTANCE = 3.0;
 
 	private enum Mission {
@@ -340,7 +344,7 @@ public class PerroCazadorMod implements ModInitializer {
 			if (dog.distanceTo(player) < DELIVER_DISTANCE) {
 				tamable.setOrderedToSit(true);
 				RECALLING.remove(id);
-				MISSIONS.remove(id); // <--- ELIMINA LA MISIÓN AL SENTARSE POR SILBIDO
+				MISSIONS.remove(id);
 				if (pending != null) {
 					PENDING.remove(id);
 					dropPending(level, dog, pending, player);
@@ -360,7 +364,7 @@ public class PerroCazadorMod implements ModInitializer {
 		}
 
 		if (tamable.isOrderedToSit()) {
-			MISSIONS.remove(id); // <--- ELIMINA LA MISIÓN SI LO SIENTAS TÚ MANUALMENTE
+			MISSIONS.remove(id);
 			if (pending != null) {
 				PENDING.remove(id);
 				dropPending(level, dog, pending, player);
