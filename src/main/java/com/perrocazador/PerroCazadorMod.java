@@ -151,23 +151,24 @@ public class PerroCazadorMod implements ModInitializer {
 						}
 						player.displayClientMessage(Component.literal("Tu perro ya no caza."), true);
 					} else {
-						dog.addTag(HUNTER_TAG);
-						// Eliminar perros muertos del HUD al marcar uno nuevo.
-STATUS.entrySet().removeIf(entry ->
-        entry.getValue().owner.equals(player.getUUID())
-        && entry.getValue().state == DogsPayload.DEAD
-);
+    dog.addTag(HUNTER_TAG);
 
-// Registrar el nuevo perro.
-STATUS.put(id, new DogInfo(player.getUUID()));
+    // Eliminar perros muertos del HUD.
+    STATUS.entrySet().removeIf(entry ->
+            entry.getValue().owner.equals(player.getUUID())
+            && entry.getValue().state == DogsPayload.DEAD
+    );
 
-// Actualizar inmediatamente el HUD.
-sendStatus((ServerPlayer) player);
+    // Registrar el nuevo perro.
+    STATUS.put(id, new DogInfo(player.getUUID()));
 
-player.displayClientMessage(
-        Component.literal("¡Tu perro ahora es cazador!"), true
-);
-					}
+    // Actualizar el HUD inmediatamente.
+    sendStatus((ServerPlayer) player);
+
+    player.displayClientMessage(
+            Component.literal("¡Tu perro ahora es cazador!"), true
+    );
+}
 				}
 				return InteractionResult.SUCCESS;
 			}
