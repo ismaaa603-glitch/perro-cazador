@@ -125,6 +125,11 @@ public class PerroCazadorMod implements ModInitializer {
 			}
 			ItemStack held = player.getItemInHand(hand);
 
+			// ¡NUEVA LÓGICA DE CURACIÓN! Si el perro está herido y tienes comida, deja que Minecraft lo cure.
+			if (dog.getHealth() < dog.getMaxHealth() && dog.isFood(held)) {
+				return InteractionResult.PASS; 
+			}
+
 			if (player.isShiftKeyDown() && held.is(Items.BONE)) {
 				if (!level.isClientSide()) {
 					UUID id = dog.getUUID();
@@ -167,7 +172,6 @@ public class PerroCazadorMod implements ModInitializer {
 			return InteractionResult.PASS;
 		});
 
-		// El perro cazador no puede dañar a mobs que no estén en su lista de presas
 		ServerLivingEntityEvents.ALLOW_DAMAGE.register((entity, source, amount) -> {
 			Entity attacker = source.getEntity();
 			if (attacker instanceof TamableAnimal dog && dog.getTags().contains(HUNTER_TAG)) {
@@ -260,7 +264,6 @@ public class PerroCazadorMod implements ModInitializer {
 		return PREY.contains(e.getType());
 	}
 
-	// Método público para que el Mixin (WolfMixin) pueda comprobar si el objetivo es válido
 	public static boolean isHuntTargetStatic(LivingEntity e, UUID dogId) {
 		Mission mission = MISSIONS.get(dogId);
 		return isHuntTarget(e, mission);
@@ -297,7 +300,6 @@ public class PerroCazadorMod implements ModInitializer {
 		TamableAnimal tamable = (TamableAnimal) dog;
 		UUID id = dog.getUUID();
 
-		// 1. ACTUALIZAR EL HUD SIEMPRE (Vida y posición exactas al instante)
 		updateDogInfo(dog, player);
 
 		AttributeInstance range = dog.getAttribute(Attributes.FOLLOW_RANGE);
@@ -326,7 +328,6 @@ public class PerroCazadorMod implements ModInitializer {
 
 		if (pending != null && pending.delivering) {
 			pending.deliverTicks++;
-			// Si llega al jugador o pasan 30 segundos atascado, suelta el objeto
 			if (dist < DELIVER_DISTANCE || pending.deliverTicks > 600) {
 				PENDING.remove(id);
 				dropPending(level, dog, pending, player);
@@ -339,10 +340,8 @@ public class PerroCazadorMod implements ModInitializer {
 			return;
 		}
 
-		// 2. LÓGICA DE OBJETIVOS
 		if (dog.getTarget() != null && dog.getTarget().isAlive()) {
 			if (!isHuntTarget(dog.getTarget(), mission)) {
-				// Si es un esqueleto, zombi, etc., borramos el objetivo y el rencor de la IA vanilla
 				dog.setTarget(null);
 				dog.setLastHurtByMob(null); 
 			} else {
@@ -356,7 +355,6 @@ public class PerroCazadorMod implements ModInitializer {
 			return;
 		}
 
-		// 3. BUSCAR NUEVAS PRESAS
 		Mob prey = level.getEntitiesOfClass(Mob.class,
 				player.getBoundingBox().inflate(HUNT_RADIUS),
 				e -> isHuntTarget(e, mission)
@@ -383,7 +381,6 @@ public class PerroCazadorMod implements ModInitializer {
 		}
 	}
 
-	// Actualiza la vida y posición constantemente
 	private static void updateDogInfo(Mob dog, ServerPlayer player) {
 		DogInfo info = STATUS.computeIfAbsent(dog.getUUID(), k -> new DogInfo(player.getUUID()));
 		info.state = DogsPayload.ALIVE;
@@ -396,7 +393,6 @@ public class PerroCazadorMod implements ModInitializer {
 		info.dim = dog.level().dimension().toString();
 	}
 
-	// Cambia solo el texto de estado (Cazando, Sentado, etc.)
 	private static void setActivity(Mob dog, String activity) {
 		DogInfo info = STATUS.get(dog.getUUID());
 		if (info != null) {
