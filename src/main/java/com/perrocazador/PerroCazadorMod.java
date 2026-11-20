@@ -516,9 +516,15 @@ public class PerroCazadorMod implements ModInitializer {
 		List<ItemEntity> drops = level.getEntitiesOfClass(ItemEntity.class,
 				victim.getBoundingBox().inflate(3.0),
 				item -> item.isAlive() && item.tickCount < 20);
+				
 		for (ItemEntity drop : drops) {
-			pending.items.add(drop.getItem().copy());
-			drop.discard();
+			ItemStack stack = drop.getItem();
+			// Solo recoge carne de cerdo, carne de oveja o perlas de ender.
+			// Si es otra cosa (como lana), se queda en el suelo.
+			if (stack.is(Items.PORKCHOP) || stack.is(Items.MUTTON) || stack.is(Items.ENDER_PEARL)) {
+				pending.items.add(stack.copy());
+				drop.discard();
+			}
 		}
 		
 		List<ExperienceOrb> xpDrops = level.getEntitiesOfClass(ExperienceOrb.class,
