@@ -32,12 +32,16 @@ public class PerroCazadorMod implements ModInitializer {
 	private static final Set<EntityType<?>> PREY = Set.of(
 			EntityType.COW, EntityType.PIG, EntityType.SHEEP, EntityType.CHICKEN, EntityType.RABBIT);
 
-	private static final double OWNER_RADIUS = 24.0;
-	private static final double SEARCH_RADIUS = 48.0;
+	/** Distancia maxima (en bloques) a la que el perro busca presas alrededor de ti. Configurable. */
+	private static double OWNER_RADIUS = 24.0;
+	/** Distancia maxima a la que se tiene en cuenta al perro. Siempre al menos el doble de la anterior. */
+	private static double SEARCH_RADIUS = 48.0;
 	private static final int CHECK_INTERVAL = 20; // ticks
 
 	@Override
 	public void onInitialize() {
+		loadConfig();
+
 		UseEntityCallback.EVENT.register((player, level, hand, entity, hitResult) -> {
 			if (!player.isShiftKeyDown()) {
 				return InteractionResult.PASS;
@@ -88,6 +92,29 @@ public class PerroCazadorMod implements ModInitializer {
 			deliverLoot(level, victim, owner);
 			owner.giveExperiencePoints(1 + owner.getRandom().nextInt(3));
 		});
+	}
+
+	private static void loadConfig() {
+		java.nio.file.Path file = net.fabricmc.loader.api.FabricLoader.getInstance()
+				.getConfigDir().resolve("perro-cazador.properties");
+		java.util.Properties props = new java.util.Properties();
+		try {
+			if (java.nio.file.Files.exists(file)) {
+				try (java.io.Reader r = java.nio.file.Files.newBufferedReader(file)) {
+					props.load(r);
+				}
+			} else {
+				props.setProperty("distancia_caza", "24");
+				try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(file)) {
+					props.store(w, "Perro Cazador: distancia_caza = bloques alrededor de ti donde caza (recomendado 8-64)");
+				}
+			}
+			double d = Double.parseDouble(props.getProperty("distancia_caza", "24").trim());
+			OWNER_RADIUS = Math.max(4.0, Math.min(d, 128.0));
+		} catch (Exception e) {
+			OWNER_RADIUS = 24.0;
+		}
+		SEARCH_RADIUS = Math.max(48.0, OWNER_RADIUS * 2.0);
 	}
 
 	private static void tickPlayer(ServerPlayer player) {
