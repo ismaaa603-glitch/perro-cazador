@@ -2,7 +2,6 @@ package com.perrocazador;
 
 import java.util.List;
 
-import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
@@ -30,8 +29,9 @@ public class PerroCazadorClient implements ClientModInitializer {
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			if (client.player == null) return;
 
-			// Escuchar la tecla 'ñ' (Semicolon en teclados US, que es la tecla física de la ñ)
-			boolean isPressed = InputConstants.isKeyDown(client.getWindow().getWindow(), GLFW.GLFW_KEY_SEMICOLON);
+			// Comprobar si la tecla 'ñ' (Semicolon) está siendo pulsada en la ventana de Minecraft
+			long windowHandle = client.getWindow().getWindow();
+			boolean isPressed = GLFW.glfwGetKey(windowHandle, GLFW.GLFW_KEY_SEMICOLON) == GLFW.GLFW_PRESS;
 
 			// Si se acaba de pulsar y no hay ninguna pantalla abierta (como el chat o el inventario)
 			if (isPressed && !wasPressed && client.screen == null) {
