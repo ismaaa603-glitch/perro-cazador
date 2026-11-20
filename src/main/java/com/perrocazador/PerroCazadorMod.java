@@ -20,7 +20,9 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.TicketType;
 import net.minecraft.util.RandomSource;
+import net.minecraft.util.Unit;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
@@ -35,13 +37,13 @@ import net.minecraft.world.entity.monster.EnderMan;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.phys.Vec3;
 
 public class PerroCazadorMod implements ModInitializer {
 	public static final String MOD_ID = "perro_cazador";
 	public static final String HUNTER_TAG = "perro_cazador";
 
-	// AÑADIDO: EntityType.CHICKEN a las presas por defecto
 	private static final Set<EntityType<?>> PREY = Set.of(EntityType.PIG, EntityType.SHEEP, EntityType.CHICKEN);
 
 	private static final double HUNT_RADIUS = 128.0; 
@@ -57,7 +59,7 @@ public class PerroCazadorMod implements ModInitializer {
 		ENDERMAN(EntityType.ENDERMAN, Items.ENDER_PEARL, Items.ENDER_PEARL, "endermans"),
 		PIG(EntityType.PIG, Items.PORKCHOP, Items.PORKCHOP, "cerdos"),
 		SHEEP(EntityType.SHEEP, Items.MUTTON, Items.MUTTON, "ovejas"),
-		CHICKEN(EntityType.CHICKEN, Items.CHICKEN, Items.CHICKEN, "pollos"); // AÑADIDO: Misión de pollos
+		CHICKEN(EntityType.CHICKEN, Items.CHICKEN, Items.CHICKEN, "pollos");
 
 		final EntityType<?> target;
 		final Item trigger;
@@ -111,11 +113,17 @@ public class PerroCazadorMod implements ModInitializer {
 		}
 	}
 
+	// Estructura para guardar el chunk y el nivel donde se cargó
+	private record TicketData(ServerLevel level, ChunkPos pos) {}
+
 	private static final Map<UUID, Pending> PENDING = new HashMap<>();
 	private static final Map<UUID, Mission> MISSIONS = new HashMap<>();
 	private static final Map<UUID, DogInfo> STATUS = new HashMap<>();
 	private static final Set<UUID> HUD_ACTIVE = new HashSet<>();
 	private static final Set<UUID> RECALLING = new HashSet<>();
+	
+	// Mapa para rastrear a los perros que están cargando chunks (Máximo 2)
+	private static final Map<UUID, TicketData> ACTIVE_TICKETS = new HashMap<>();
 
 	@Override
 	public void onInitialize() {
@@ -136,6 +144,7 @@ public class PerroCazadorMod implements ModInitializer {
 					tamable.setOrderedToSit(false);
 				}
 				dog.setTarget(null);
+				removeTicket(dog.getUUID()); // Liberar chunk al llamarlo
 			}
 		});
 
@@ -159,6 +168,7 @@ public class PerroCazadorMod implements ModInitializer {
 						MISSIONS.remove(id);
 						STATUS.remove(id);
 						RECALLING.remove(id);
+						removeTicket(id); // Liberar chunk
 						Pending carried = PENDING.remove(id);
 						if (carried != null && level instanceof ServerLevel serverLevel) {
 							dropPending(serverLevel, dog, carried, player);
@@ -229,6 +239,7 @@ public class PerroCazadorMod implements ModInitializer {
 				STATUS.remove(victimId);
 				MISSIONS.remove(victimId);
 				RECALLING.remove(victimId);
+				removeTicket(victimId); // Liberar chunk si muere
 			}
 
 			Pending carried = PENDING.remove(victimId);
@@ -261,6 +272,11 @@ public class PerroCazadorMod implements ModInitializer {
 		});
 
 		ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
+			// Limpiar todos los tickets para no dejar chunks cargados al cerrar
+			for (UUID id : new ArrayList<>(ACTIVE_TICKETS.keySet())) {
+				removeTicket(id);
+			}
+
 			for (Map.Entry<UUID, Pending> entry : new ArrayList<>(PENDING.entrySet())) {
 				for (ServerLevel level : server.getAllLevels()) {
 					Entity dog = level.getEntity(entry.getKey());
@@ -276,6 +292,13 @@ public class PerroCazadorMod implements ModInitializer {
 			HUD_ACTIVE.clear();
 			RECALLING.clear();
 		});
+	}
+
+	private static void removeTicket(UUID id) {
+		TicketData data = ACTIVE_TICKETS.remove(id);
+		if (data != null) {
+			data.level().getChunkSource().removeRegionTicket(TicketType.FORCED, data.pos(), 3, Unit.INSTANCE);
+		}
 	}
 
 	private static boolean isHuntTarget(LivingEntity e, Mission mission) {
@@ -338,11 +361,46 @@ public class PerroCazadorMod implements ModInitializer {
 		Mission mission = MISSIONS.get(id);
 		double dist = dog.distanceTo(player);
 
+		// --- GESTIÓN DE CARGA DE CHUNKS (MÁX 2 PERROS) ---
+		if (dist > 64.0) {
+			if (!ACTIVE_TICKETS.containsKey(id)) {
+				if (ACTIVE_TICKETS.size() < 2) {
+					ChunkPos currentChunk = new ChunkPos(dog.blockPosition());
+					ACTIVE_TICKETS.put(id, new TicketData(level, currentChunk));
+					level.getChunkSource().addRegionTicket(TicketType.FORCED, currentChunk, 3, Unit.INSTANCE);
+				} else {
+					// Ya hay 2 perros cargando chunks. Este debe volver para no lagear.
+					if (dog.getTarget() != null) {
+						dog.setTarget(null);
+						dog.setLastHurtByMob(null); 
+					}
+					if (dog.getNavigation().isDone()) {
+						dog.getNavigation().moveTo(player, 1.2);
+					}
+					setActivity(dog, "Volviendo (limite chunks)");
+					return;
+				}
+			} else {
+				// Si ya tiene ticket, comprobar si se ha movido de chunk para actualizarlo
+				TicketData data = ACTIVE_TICKETS.get(id);
+				ChunkPos currentChunk = new ChunkPos(dog.blockPosition());
+				if (data.pos().x != currentChunk.x || data.pos().z != currentChunk.z) {
+					data.level().getChunkSource().removeRegionTicket(TicketType.FORCED, data.pos(), 3, Unit.INSTANCE);
+					level.getChunkSource().addRegionTicket(TicketType.FORCED, currentChunk, 3, Unit.INSTANCE);
+					ACTIVE_TICKETS.put(id, new TicketData(level, currentChunk));
+				}
+			}
+		} else if (dist < 48.0) {
+			// Si se acerca, liberar el ticket
+			removeTicket(id);
+		}
+
 		if (RECALLING.contains(id)) {
 			if (dog.distanceTo(player) < DELIVER_DISTANCE) {
 				tamable.setOrderedToSit(true);
 				RECALLING.remove(id);
 				MISSIONS.remove(id);
+				removeTicket(id);
 				if (pending != null) {
 					PENDING.remove(id);
 					dropPending(level, dog, pending, player);
@@ -362,6 +420,7 @@ public class PerroCazadorMod implements ModInitializer {
 		}
 
 		if (tamable.isOrderedToSit()) {
+			removeTicket(id);
 			if (pending != null) {
 				PENDING.remove(id);
 				dropPending(level, dog, pending, player);
@@ -386,6 +445,7 @@ public class PerroCazadorMod implements ModInitializer {
 				PENDING.remove(id);
 				dropPending(level, dog, pending, player);
 				setActivity(dog, "Botin entregado");
+				removeTicket(id);
 			} else {
 				dog.setTarget(null);
 				dog.getNavigation().moveTo(player, 1.3);
@@ -468,7 +528,7 @@ public class PerroCazadorMod implements ModInitializer {
 		for (DogInfo i : STATUS.values()) {
 			if (i.owner.equals(player.getUUID())) {
 				list.add(new DogsPayload.Entry(i.name, i.state, i.x, i.y, i.z,
-						i.health, i.maxHealth, i.dim, i.activity));
+						i.health, i.maxHealth, i.dim, i.activity, 0)); 
 			}
 		}
 		boolean had = HUD_ACTIVE.contains(player.getUUID());
@@ -521,8 +581,6 @@ public class PerroCazadorMod implements ModInitializer {
 				
 		for (ItemEntity drop : drops) {
 			ItemStack stack = drop.getItem();
-			// Solo recoge carne de cerdo, carne de oveja, perlas de ender, POLLO CRUDO y PLUMAS.
-			// Si es otra cosa (como lana o huesos), se queda en el suelo.
 			if (stack.is(Items.PORKCHOP) || stack.is(Items.MUTTON) || stack.is(Items.ENDER_PEARL) 
 					|| stack.is(Items.CHICKEN) || stack.is(Items.FEATHER)) {
 				pending.items.add(stack.copy());
