@@ -113,10 +113,30 @@ public class PerroCazadorMod implements ModInitializer {
 	private static final Map<UUID, Mission> MISSIONS = new HashMap<>();
 	private static final Map<UUID, DogInfo> STATUS = new HashMap<>();
 	private static final Set<UUID> HUD_ACTIVE = new HashSet<>();
+	private static final Set<UUID> RECALLING = new HashSet<>();
 
 	@Override
 	public void onInitialize() {
 		PayloadTypeRegistry.playS2C().register(DogsPayload.TYPE, DogsPayload.CODEC);
+		PayloadTypeRegistry.playC2S().register(RecallPayload.TYPE, RecallPayload.CODEC);
+
+		// Receptor del silbido
+		ServerPlayNetworking.registerGlobalReceiver(RecallPayload.TYPE, (payload, context) -> {
+			ServerPlayer player = context.player();
+			ServerLevel level = (ServerLevel) player.level();
+			List<Mob> dogs = level.getEntitiesOfClass(Mob.class,
+					player.getBoundingBox().inflate(LEASH_DISTANCE + 64),
+					e -> e instanceof TamableAnimal t && e.getType() == EntityType.WOLF
+							&& t.isTame() && t.isOwnedBy(player) && e.getTags().contains(HUNTER_TAG));
+			for (Mob dog : dogs) {
+				RECALLING.add(dog.getUUID());
+				TamableAnimal tamable = (TamableAnimal) dog;
+				if (tamable.isOrderedToSit()) {
+					tamable.setOrderedToSit(false);
+				}
+				dog.setTarget(null);
+			}
+		});
 
 		UseEntityCallback.EVENT.register((player, level, hand, entity, hitResult) -> {
 			if (!(entity instanceof TamableAnimal dog) || dog.getType() != EntityType.WOLF
@@ -137,6 +157,7 @@ public class PerroCazadorMod implements ModInitializer {
 						dog.setTarget(null);
 						MISSIONS.remove(id);
 						STATUS.remove(id);
+						RECALLING.remove(id);
 						Pending carried = PENDING.remove(id);
 						if (carried != null && level instanceof ServerLevel serverLevel) {
 							dropPending(serverLevel, dog, carried, player);
@@ -204,9 +225,9 @@ public class PerroCazadorMod implements ModInitializer {
 			UUID victimId = victim.getUUID();
 
 			if (victim instanceof TamableAnimal && victim.getTags().contains(HUNTER_TAG)) {
-				// BORRADO INMEDIATO: Lo quitamos del HUD en cuanto muere
 				STATUS.remove(victimId);
 				MISSIONS.remove(victimId);
+				RECALLING.remove(victimId);
 			}
 
 			Pending carried = PENDING.remove(victimId);
@@ -226,13 +247,16 @@ public class PerroCazadorMod implements ModInitializer {
 
 			Pending pending = PENDING.computeIfAbsent(dog.getUUID(), k -> new Pending());
 			collectLoot(level, victim, pending);
-			pending.xp += 1 + dog.getRandom().nextInt(3);
 
-			if (mission == null) {
+			// Lógica de entrega: Si llega a 16 items o completa la misión, vuelve.
+			if (pending.items.size() >= 16) {
 				pending.delivering = true;
-			} else if (pending.has(mission.goal)) {
-				MISSIONS.remove(dog.getUUID());
-				pending.delivering = true;
+			}
+			if (mission != null) {
+				if (pending.has(mission.goal)) {
+					MISSIONS.remove(dog.getUUID());
+					pending.delivering = true;
+				}
 			}
 		});
 
@@ -250,6 +274,7 @@ public class PerroCazadorMod implements ModInitializer {
 			MISSIONS.clear();
 			STATUS.clear();
 			HUD_ACTIVE.clear();
+			RECALLING.clear();
 		});
 	}
 
@@ -268,7 +293,6 @@ public class PerroCazadorMod implements ModInitializer {
 	private static void tickPlayerAI(ServerPlayer player) {
 		ServerLevel level = (ServerLevel) player.level();
 		
-		// Limpieza de seguridad: si hay algún perro muerto residual en el HUD, lo borramos
 		STATUS.entrySet().removeIf(entry -> 
 				entry.getValue().owner.equals(player.getUUID()) 
 				&& entry.getValue().state == DogsPayload.DEAD
@@ -279,7 +303,7 @@ public class PerroCazadorMod implements ModInitializer {
 				e -> e instanceof TamableAnimal t
 						&& e.getType() == EntityType.WOLF
 						&& t.isTame()
-						&& t.isAlive() // IMPORTANTE: Solo procesar perros vivos
+						&& t.isAlive()
 						&& t.isOwnedBy(player)
 						&& e.getTags().contains(HUNTER_TAG));
 
@@ -312,6 +336,29 @@ public class PerroCazadorMod implements ModInitializer {
 
 		Pending pending = PENDING.get(id);
 		Mission mission = MISSIONS.get(id);
+
+		// --- LÓGICA DEL SILBIDO (RECALL) ---
+		if (RECALLING.contains(id)) {
+			if (dog.distanceTo(player) < DELIVER_DISTANCE) {
+				tamable.setOrderedToSit(true);
+				RECALLING.remove(id);
+				if (pending != null) {
+					PENDING.remove(id);
+					dropPending(level, dog, pending, player);
+				}
+				setActivity(dog, "Sentado (Llamado)");
+			} else {
+				if ((dog.getTarget() == null || !dog.getTarget().isAlive()) && dog.distanceTo(player) > LEASH_DISTANCE) {
+					dog.setTarget(null);
+					teleportNearOwner(level, dog, player);
+				} else {
+					dog.setTarget(null);
+					if (dog.getNavigation().isDone()) dog.getNavigation().moveTo(player, 1.2);
+				}
+				setActivity(dog, "Volviendo al dueno");
+			}
+			return;
+		}
 
 		if (tamable.isOrderedToSit()) {
 			if (pending != null) {
@@ -464,12 +511,22 @@ public class PerroCazadorMod implements ModInitializer {
 	}
 
 	private static void collectLoot(ServerLevel level, LivingEntity victim, Pending pending) {
+		// Recoger items
 		List<ItemEntity> drops = level.getEntitiesOfClass(ItemEntity.class,
 				victim.getBoundingBox().inflate(3.0),
 				item -> item.isAlive() && item.tickCount < 20);
 		for (ItemEntity drop : drops) {
 			pending.items.add(drop.getItem().copy());
 			drop.discard();
+		}
+		
+		// Recoger Orbes de Experiencia (XP)
+		List<ExperienceOrb> xpDrops = level.getEntitiesOfClass(ExperienceOrb.class,
+				victim.getBoundingBox().inflate(3.0),
+				orb -> orb.isAlive());
+		for (ExperienceOrb orb : xpDrops) {
+			pending.xp += orb.getValue();
+			orb.discard();
 		}
 	}
 
