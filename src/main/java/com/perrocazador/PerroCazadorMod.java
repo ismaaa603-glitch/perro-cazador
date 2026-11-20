@@ -23,14 +23,17 @@ import net.minecraft.world.entity.ExperienceOrb;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.TamableAnimal;
+import net.minecraft.world.entity.ai.goal.FollowOwnerGoal;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.phys.Vec3;
 
 /**
  * Perro Cazador: solo los lobos domados que tu marques (agachado + clic derecho con un hueso)
- * cazan animales de granja cerca de ti y te traen el botin y la experiencia y los sueltan a tus pies.
+ * cazan cerdos y ovejas, acumulan la carne y la XP y, cuando llevan bastante, te la traen y la sueltan.
+ * No recogen lana ni cuero y no se teletransportan a ti.
  */
 public class PerroCazadorMod implements ModInitializer {
 	public static final String HUNTER_TAG = "perro_cazador";
@@ -39,12 +42,19 @@ public class PerroCazadorMod implements ModInitializer {
 	private static final Set<EntityType<?>> PREY = Set.of(
 			EntityType.PIG, EntityType.SHEEP);
 
-	private static final double OWNER_RADIUS = 2000.0; // practicamente: todos los chunks cargados
+	/** Unicos items que el perro recoge (lo demas, como la lana, se queda en el suelo). */
+	private static final Set<Item> MEAT = Set.of(
+			Items.PORKCHOP, Items.COOKED_PORKCHOP,
+			Items.MUTTON, Items.COOKED_MUTTON);
+
+	private static final double OWNER_RADIUS = 2000.0;
 	private static final double SEARCH_RADIUS = 2000.0;
 	private static final double FOLLOW_RANGE = 128.0; // hasta donde puede trazar ruta el perro
 	private static final int CHECK_INTERVAL = 20; // ticks
+	private static final int DELIVER_ITEMS = 16; // cuando lleva esta cantidad de items, viene a entregarlos
 	private static final double DELIVER_DISTANCE = 3.0; // bloques: a esta distancia del dueno suelta el botin
-	private static final int DELIVER_TIMEOUT = 1200; // ticks (60 s): si no llega, suelta el botin donde este
+	private static final int DELIVER_TIMEOUT = 1200; // ticks (60 s) desde que sale a entregar
+	private static final double IDLE_RETURN_DISTANCE = 12.0; // sin presas, vuelve andando si esta mas lejos
 
 	/** Botin que cada perro lleva encima hasta entregarlo (clave: UUID del perro). */
 	private static final Map<UUID, Pending> PENDING = new HashMap<>();
@@ -52,10 +62,15 @@ public class PerroCazadorMod implements ModInitializer {
 	private static final class Pending {
 		final List<ItemStack> items = new ArrayList<>();
 		int xp;
-		final long startTick;
+		boolean delivering;
+		long deliverStartTick;
 
-		Pending(long startTick) {
-			this.startTick = startTick;
+		int itemCount() {
+			int total = 0;
+			for (ItemStack s : items) {
+				total += s.getCount();
+			}
+			return total;
 		}
 	}
 
@@ -76,6 +91,13 @@ public class PerroCazadorMod implements ModInitializer {
 				if (dog.getTags().contains(HUNTER_TAG)) {
 					dog.removeTag(HUNTER_TAG);
 					dog.setTarget(null);
+					// Si llevaba botin, lo suelta aqui.
+					Pending carried = PENDING.remove(dog.getUUID());
+					if (carried != null && dog.level() instanceof ServerLevel sl) {
+						dropPending(sl, dog, carried, null);
+					}
+					// Devuelve el comportamiento normal de seguirte (con su teletransporte).
+					dog.goalSelector.addGoal(6, new FollowOwnerGoal(dog, 1.0, 10.0F, 2.0F));
 					player.displayClientMessage(Component.literal("Tu perro ya no caza."), true);
 				} else {
 					dog.addTag(HUNTER_TAG);
@@ -114,7 +136,7 @@ public class PerroCazadorMod implements ModInitializer {
 			if (!(victim.level() instanceof ServerLevel level)) {
 				return;
 			}
-			Pending pending = PENDING.computeIfAbsent(dog.getUUID(), k -> new Pending(level.getServer().getTickCount()));
+			Pending pending = PENDING.computeIfAbsent(dog.getUUID(), k -> new Pending());
 			collectLoot(level, victim, pending);
 			pending.xp += 1 + dog.getRandom().nextInt(3);
 		});
@@ -136,6 +158,7 @@ public class PerroCazadorMod implements ModInitializer {
 
 	private static void tickPlayer(ServerPlayer player) {
 		ServerLevel level = (ServerLevel) player.level();
+		long now = level.getServer().getTickCount();
 		List<Mob> dogs = level.getEntitiesOfClass(Mob.class,
 				player.getBoundingBox().inflate(SEARCH_RADIUS),
 				e -> e instanceof TamableAnimal t
@@ -151,35 +174,53 @@ public class PerroCazadorMod implements ModInitializer {
 			if (range != null && range.getBaseValue() < FOLLOW_RANGE) {
 				range.setBaseValue(FOLLOW_RANGE);
 			}
-			// Si lleva botin, va hacia ti y lo suelta; no caza hasta entregarlo.
+
+			// Quita el objetivo de "seguir al dueno" del lobo: es el que lo teletransporta.
+			// Se repite porque al recargar el mundo el lobo recupera sus objetivos por defecto.
+			dog.goalSelector.removeAllGoals(goal -> goal instanceof FollowOwnerGoal);
+
 			Pending pending = PENDING.get(dog.getUUID());
-			if (pending != null) {
-				long waited = level.getServer().getTickCount() - pending.startTick;
-				if (tamable.isOrderedToSit() || waited > DELIVER_TIMEOUT || dog.distanceTo(player) < DELIVER_DISTANCE) {
+
+			// Sentado: si lleva botin, lo suelta donde esta.
+			if (tamable.isOrderedToSit()) {
+				if (pending != null) {
 					PENDING.remove(dog.getUUID());
 					dropPending(level, dog, pending, player);
-				} else {
-					dog.getNavigation().moveTo(player, 1.3);
 				}
 				continue;
 			}
-			if (tamable.isOrderedToSit()) {
-				continue;
+
+			if (pending != null) {
+				// Lleva suficiente: empieza a ir hacia ti.
+				if (!pending.delivering && pending.itemCount() >= DELIVER_ITEMS) {
+					pending.delivering = true;
+					pending.deliverStartTick = now;
+				}
+				if (pending.delivering) {
+					if (now - pending.deliverStartTick > DELIVER_TIMEOUT
+							|| dog.distanceTo(player) < DELIVER_DISTANCE) {
+						PENDING.remove(dog.getUUID());
+						dropPending(level, dog, pending, player);
+					} else {
+						dog.setTarget(null);
+						dog.getNavigation().moveTo(player, 1.3);
+					}
+					continue;
+				}
 			}
+
 			// Si esta peleando (por ejemplo defendiendote), no interferir.
 			if (dog.getTarget() != null && dog.getTarget().isAlive()) {
 				continue;
 			}
-			// Si esta herido, que descanse y te siga.
+			// Si esta herido, que descanse y te siga andando.
 			if (dog.getHealth() < dog.getMaxHealth() * 0.4f) {
-				continue;
-			}
-			if (dog.distanceTo(player) > SEARCH_RADIUS) {
+				followOnFoot(dog, player);
 				continue;
 			}
 
 			Mob prey = level.getEntitiesOfClass(Mob.class,
-					player.getBoundingBox().inflate(OWNER_RADIUS),
+					dog.getBoundingBox().inflate(OWNER_RADIUS),
 					e -> PREY.contains(e.getType())
 							&& e.isAlive()
 							&& !e.isBaby()
@@ -191,15 +232,24 @@ public class PerroCazadorMod implements ModInitializer {
 
 			if (prey != null) {
 				dog.setTarget(prey);
+			} else {
+				followOnFoot(dog, player);
 			}
 		}
 	}
 
-	/** El perro "recoge" los drops de la presa: se quitan del suelo y se guardan para entregarlos. */
+	/** Seguir al dueno andando (sin teletransporte) cuando no hay nada que cazar. */
+	private static void followOnFoot(Mob dog, ServerPlayer player) {
+		if (dog.distanceTo(player) > IDLE_RETURN_DISTANCE) {
+			dog.getNavigation().moveTo(player, 1.2);
+		}
+	}
+
+	/** El perro "recoge" solo la carne de los drops; la lana y lo demas se quedan en el suelo. */
 	private static void collectLoot(ServerLevel level, LivingEntity victim, Pending pending) {
 		List<ItemEntity> drops = level.getEntitiesOfClass(ItemEntity.class,
 				victim.getBoundingBox().inflate(3.0),
-				item -> item.isAlive() && item.tickCount < 20);
+				item -> item.isAlive() && item.tickCount < 20 && MEAT.contains(item.getItem().getItem()));
 		for (ItemEntity drop : drops) {
 			pending.items.add(drop.getItem().copy());
 			drop.discard();
