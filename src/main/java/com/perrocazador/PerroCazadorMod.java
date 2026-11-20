@@ -52,7 +52,6 @@ public class PerroCazadorMod implements ModInitializer {
 	private static final double SEARCH_RADIUS = 2000.0;
 	private static final double FOLLOW_RANGE = 128.0; // hasta donde puede trazar ruta el perro
 	private static final int CHECK_INTERVAL = 20; // ticks
-	private static final int DELIVER_ITEMS = 16; // cuando lleva esta cantidad de items, viene a entregarlos
 	private static final double DELIVER_DISTANCE = 3.0; // bloques: a esta distancia del dueno suelta el botin
 	private static final int DELIVER_TIMEOUT = 1200; // ticks (60 s) desde que sale a entregar
 	private static final double IDLE_RETURN_DISTANCE = 12.0; // sin presas, vuelve andando si esta mas lejos
@@ -124,12 +123,6 @@ public class PerroCazadorMod implements ModInitializer {
 		});
 
 		ServerLivingEntityEvents.AFTER_DEATH.register((victim, source) -> {
-			// Aviso al dueno si muere su perro cazador.
-			if (victim instanceof TamableAnimal deadDog && deadDog.getTags().contains(HUNTER_TAG)
-					&& deadDog.getOwner() instanceof ServerPlayer deadOwner) {
-				deadOwner.displayClientMessage(Component.literal("Tu perro cazador ha muerto."), false);
-			}
-
 			// Si muere un perro que llevaba botin, lo suelta donde muere.
 			Pending carried = PENDING.remove(victim.getUUID());
 			if (carried != null && victim.level() instanceof ServerLevel deathLevel) {
@@ -169,9 +162,6 @@ public class PerroCazadorMod implements ModInitializer {
 	private static void tickPlayer(ServerPlayer player) {
 		ServerLevel level = (ServerLevel) player.level();
 		long now = level.getServer().getTickCount();
-		// Solo caza dentro de TUS chunks activos (distancia de simulacion menos un margen).
-		double huntRange = Math.max(32.0,
-				(level.getServer().getPlayerList().getSimulationDistance() - 2) * 16.0);
 		List<Mob> dogs = level.getEntitiesOfClass(Mob.class,
 				player.getBoundingBox().inflate(SEARCH_RADIUS),
 				e -> e instanceof TamableAnimal t
@@ -180,16 +170,8 @@ public class PerroCazadorMod implements ModInitializer {
 						&& t.isOwnedBy(player)
 						&& e.getTags().contains(HUNTER_TAG));
 
-		List<String> status = new ArrayList<>();
 		for (Mob dog : dogs) {
 			TamableAnimal tamable = (TamableAnimal) dog;
-			if (!tamable.isOrderedToSit()) {
-				Pending carriedNow = PENDING.get(dog.getUUID());
-				int carriedItems = carriedNow == null ? 0 : carriedNow.itemCount();
-				status.add("Perro vivo | " + Math.round(dog.distanceTo(player)) + " m | vida "
-						+ Math.round(dog.getHealth()) + "/" + Math.round(dog.getMaxHealth())
-						+ " | carga " + carriedItems + "/" + DELIVER_ITEMS);
-			}
 			net.minecraft.world.entity.ai.attributes.AttributeInstance range =
 					dog.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE);
 			if (range != null && range.getBaseValue() < FOLLOW_RANGE) {
@@ -215,8 +197,8 @@ public class PerroCazadorMod implements ModInitializer {
 			}
 
 			if (pending != null) {
-				// Lleva suficiente: empieza a ir hacia ti.
-				if (!pending.delivering && pending.itemCount() >= DELIVER_ITEMS) {
+				// Tras cada presa: va hacia ti a entregar el botin.
+				if (!pending.delivering) {
 					pending.delivering = true;
 					pending.deliverStartTick = now;
 				}
@@ -243,19 +225,12 @@ public class PerroCazadorMod implements ModInitializer {
 				continue;
 			}
 
-			// Si se ha salido de tus chunks activos, vuelve hacia ti en vez de cazar.
-			if (dog.distanceTo(player) > huntRange) {
-				walkToward(dog, player, 1.3);
-				continue;
-			}
-
 			Mob prey = level.getEntitiesOfClass(Mob.class,
-					player.getBoundingBox().inflate(huntRange),
+					player.getBoundingBox().inflate(OWNER_RADIUS),
 					e -> PREY.contains(e.getType())
 							&& e.isAlive()
 							&& !e.isBaby()
 							&& !e.hasCustomName()
-							&& e.distanceTo(player) <= huntRange
 							&& e != dog)
 					.stream()
 					.min(Comparator.comparingDouble(e -> e.distanceToSqr(dog)))
@@ -266,9 +241,6 @@ public class PerroCazadorMod implements ModInitializer {
 			} else {
 				followOnFoot(dog, player);
 			}
-		}
-		if (!status.isEmpty()) {
-			player.displayClientMessage(Component.literal(String.join("   ||   ", status)), true);
 		}
 	}
 
