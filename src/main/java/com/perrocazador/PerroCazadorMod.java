@@ -179,7 +179,7 @@ public class PerroCazadorMod implements ModInitializer {
 						MISSIONS.put(dog.getUUID(), mission);
 						dog.setTarget(null);
 						player.displayClientMessage(Component.literal(
-								"Tu perro ira exclusivamente a por " + mission.label + "."), true);
+								"Tu perro ira exclusivamente a por " + mission.label + " cuando se levante."), true);
 					}
 					return InteractionResult.SUCCESS;
 				}
@@ -336,14 +336,12 @@ public class PerroCazadorMod implements ModInitializer {
 		Mission mission = MISSIONS.get(id);
 		double dist = dog.distanceTo(player);
 
-		// NUEVO: Regla de rescate (si está en una cueva o atascado)
+		// Regla de rescate (si está en una cueva o atascado)
 		boolean isStuck = false;
 		if (dist > 15.0 && dog.getTarget() == null) {
-			// Si no puede encontrar un camino hacia ti (la navegación falla)
 			if (dog.getNavigation().isDone() && !dog.getNavigation().moveTo(player, 1.2)) {
 				isStuck = true;
 			}
-			// Si está muy abajo o muy arriba (en una cueva)
 			if (Math.abs(dog.getY() - player.getY()) > 25.0) {
 				isStuck = true;
 			}
@@ -357,7 +355,7 @@ public class PerroCazadorMod implements ModInitializer {
 			if (dog.distanceTo(player) < DELIVER_DISTANCE) {
 				tamable.setOrderedToSit(true);
 				RECALLING.remove(id);
-				MISSIONS.remove(id);
+				MISSIONS.remove(id); // Al llamarlo con la 'ñ' pierde la misión actual
 				if (pending != null) {
 					PENDING.remove(id);
 					dropPending(level, dog, pending, player);
@@ -376,13 +374,18 @@ public class PerroCazadorMod implements ModInitializer {
 			return;
 		}
 
+		// AQUÍ ESTÁ EL CAMBIO: Ya no borra la misión si está sentado.
 		if (tamable.isOrderedToSit()) {
-			MISSIONS.remove(id);
 			if (pending != null) {
 				PENDING.remove(id);
 				dropPending(level, dog, pending, player);
 			}
-			setActivity(dog, "Sentado");
+			// Si tiene una misión guardada, se la mostramos en el HUD.
+			if (mission != null) {
+				setActivity(dog, "Sentado (Mision: " + mission.label + ")");
+			} else {
+				setActivity(dog, "Sentado");
+			}
 			return;
 		}
 
