@@ -24,6 +24,7 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.TamableAnimal;
 import net.minecraft.world.entity.ai.goal.FollowOwnerGoal;
+import net.minecraft.world.entity.ai.goal.GoalSelector;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -97,7 +98,10 @@ public class PerroCazadorMod implements ModInitializer {
 						dropPending(sl, dog, carried, null);
 					}
 					// Devuelve el comportamiento normal de seguirte (con su teletransporte).
-					dog.goalSelector.addGoal(6, new FollowOwnerGoal(dog, 1.0, 10.0F, 2.0F));
+					GoalSelector goals = goalsOf(dog);
+					if (goals != null) {
+						goals.addGoal(6, new FollowOwnerGoal(dog, 1.0, 10.0F, 2.0F));
+					}
 					player.displayClientMessage(Component.literal("Tu perro ya no caza."), true);
 				} else {
 					dog.addTag(HUNTER_TAG);
@@ -177,7 +181,10 @@ public class PerroCazadorMod implements ModInitializer {
 
 			// Quita el objetivo de "seguir al dueno" del lobo: es el que lo teletransporta.
 			// Se repite porque al recargar el mundo el lobo recupera sus objetivos por defecto.
-			dog.goalSelector.removeAllGoals(goal -> goal instanceof FollowOwnerGoal);
+			GoalSelector goals = goalsOf(dog);
+			if (goals != null) {
+				goals.removeAllGoals(goal -> goal instanceof FollowOwnerGoal);
+			}
 
 			Pending pending = PENDING.get(dog.getUUID());
 
@@ -235,6 +242,26 @@ public class PerroCazadorMod implements ModInitializer {
 			} else {
 				followOnFoot(dog, player);
 			}
+		}
+	}
+
+	private static java.lang.reflect.Field goalSelectorField;
+
+	/** goalSelector es protected en Mob: se lee por reflexion buscando el primer campo de tipo GoalSelector. */
+	private static GoalSelector goalsOf(Mob mob) {
+		try {
+			if (goalSelectorField == null) {
+				for (java.lang.reflect.Field f : Mob.class.getDeclaredFields()) {
+					if (f.getType() == GoalSelector.class) {
+						f.setAccessible(true);
+						goalSelectorField = f;
+						break;
+					}
+				}
+			}
+			return goalSelectorField == null ? null : (GoalSelector) goalSelectorField.get(mob);
+		} catch (ReflectiveOperationException | RuntimeException e) {
+			return null;
 		}
 	}
 
