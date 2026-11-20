@@ -27,16 +27,17 @@ public class PerroCazadorClient implements ClientModInitializer {
 		HudRenderCallback.EVENT.register(PerroCazadorClient::render);
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
-			if (client.player == null || client.getWindow() == null) {
+			if (client.player == null || client.screen != null) {
+				wasPressed = false;
 				return;
 			}
 
-			// Leer el teclado directamente con GLFW nativo
-			long windowHandle = client.getWindow().getWindow();
+			// Obtener la ventana actual usando GLFW directamente (infalible)
+			long windowHandle = GLFW.glfwGetCurrentContext();
 			boolean isPressed = GLFW.glfwGetKey(windowHandle, GLFW.GLFW_KEY_SEMICOLON) == GLFW.GLFW_PRESS;
 
-			// Si se pulsa la tecla, no hay ninguna pantalla abierta y tienes un hueso
-			if (isPressed && !wasPressed && client.screen == null) {
+			// Si se pulsa la tecla y tienes un hueso en la mano principal o secundaria
+			if (isPressed && !wasPressed) {
 				if (client.player.getMainHandItem().is(Items.BONE) || client.player.getOffhandItem().is(Items.BONE)) {
 					ClientPlayNetworking.send(new RecallPayload());
 				}
