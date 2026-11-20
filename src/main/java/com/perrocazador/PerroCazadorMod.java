@@ -22,6 +22,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.InteractionResult;
+import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.ExperienceOrb;
@@ -36,35 +37,22 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.phys.Vec3;
 
-/**
- * Perro Cazador: los lobos domados que marques (agachado + clic derecho con un hueso) cazan
- * cerdos y ovejas y te traen el botin presa por presa, andando, y te lo sueltan al suelo.
- * Misiones: clic derecho al perro con ojo de ender (endermans), carne de cerdo cruda (cerdos)
- * o carne de oveja cruda (ovejas). 
- * Si hay mision activa, SOLO caza el objetivo de esa mision.
- * Solo se teletransporta si se aleja 88+ bloques del dueno (el TP vanilla del lobo se ignora).
- */
 public class PerroCazadorMod implements ModInitializer {
 	public static final String MOD_ID = "perro_cazador";
 	public static final String HUNTER_TAG = "perro_cazador";
 
-	/** Presas del modo normal (siempre activas si no hay mision). */
 	private static final Set<EntityType<?>> PREY = Set.of(EntityType.PIG, EntityType.SHEEP);
 
-	// ---- Distancias (ajustadas a 6 chunks de simulacion/renderizado) ----
 	private static final int RENDER_CHUNKS = 6;
-	/** Solo caza presas que esten a este radio del dueno. */
-	private static final double HUNT_RADIUS = RENDER_CHUNKS * 16 - 16; // 80 bloques
-	/** Si el perro se aleja mas de esto del dueno, se teletransporta cerca (nunca encima). */
+	private static final double HUNT_RADIUS = RENDER_CHUNKS * 16 - 16;
 	private static final double LEASH_DISTANCE = 88.0;
 	private static final double TELEPORT_MIN = 8.0;
 	private static final double TELEPORT_MAX = 12.0;
 
 	private static final double FOLLOW_RANGE = 128.0;
-	private static final int CHECK_INTERVAL = 10; // ticks
-	private static final double DELIVER_DISTANCE = 3.0; // a esta distancia suelta el botin
+	private static final int CHECK_INTERVAL = 1;
+	private static final double DELIVER_DISTANCE = 3.0;
 
-	/** Mision que se activa con clic derecho al perro con el objeto indicado. */
 	private enum Mission {
 		ENDERMAN(EntityType.ENDERMAN, Items.ENDER_PEARL, Items.ENDER_PEARL, "endermans"),
 		PIG(EntityType.PIG, Items.PORKCHOP, Items.PORKCHOP, "cerdos"),
@@ -96,6 +84,7 @@ public class PerroCazadorMod implements ModInitializer {
 		final List<ItemStack> items = new ArrayList<>();
 		int xp;
 		boolean delivering;
+		int deliverTicks = 0; // NUEVO: Para evitar que se quede atascado entregando
 
 		boolean has(Item item) {
 			for (ItemStack stack : items) {
@@ -137,7 +126,6 @@ public class PerroCazadorMod implements ModInitializer {
 			}
 			ItemStack held = player.getItemInHand(hand);
 
-			// Agachado + hueso: activar / desactivar el modo cazador.
 			if (player.isShiftKeyDown() && held.is(Items.BONE)) {
 				if (!level.isClientSide()) {
 					UUID id = dog.getUUID();
@@ -153,23 +141,18 @@ public class PerroCazadorMod implements ModInitializer {
 						player.displayClientMessage(Component.literal("Tu perro ya no caza."), true);
 					} else {
 						dog.addTag(HUNTER_TAG);
-
 						STATUS.entrySet().removeIf(entry ->
 								entry.getValue().owner.equals(player.getUUID())
 										&& entry.getValue().state == DogsPayload.DEAD
 						);
-
 						STATUS.put(id, new DogInfo(player.getUUID()));
 						sendStatus((ServerPlayer) player);
-
-						player.displayClientMessage(
-								Component.literal("¡Tu perro ahora es cazador!"), true);
+						player.displayClientMessage(Component.literal("¡Tu perro ahora es cazador!"), true);
 					}
 				}
 				return InteractionResult.SUCCESS;
 			}
 
-			// Sin agacharse + ojo de ender / carne de cerdo / carne de oveja: mision.
 			if (!player.isShiftKeyDown() && dog.getTags().contains(HUNTER_TAG)) {
 				Mission mission = Mission.fromStack(held);
 				if (mission != null) {
@@ -177,13 +160,26 @@ public class PerroCazadorMod implements ModInitializer {
 						MISSIONS.put(dog.getUUID(), mission);
 						dog.setTarget(null);
 						player.displayClientMessage(Component.literal(
-								"Tu perro ira exclusivamente a por " + mission.label
-										+ " y te traera lo que suelten."), true);
+								"Tu perro ira exclusivamente a por " + mission.label + "."), true);
 					}
 					return InteractionResult.SUCCESS;
 				}
 			}
 			return InteractionResult.PASS;
+		});
+
+		// Bloquear daño a mobs que no sean presas
+		ServerLivingEntityEvents.ALLOW_DAMAGE.register((entity, source, amount) -> {
+			Entity attacker = source.getEntity();
+			if (attacker instanceof TamableAnimal dog && dog.getTags().contains(HUNTER_TAG)) {
+				if (entity instanceof LivingEntity livingVictim) {
+					Mission mission = MISSIONS.get(dog.getUUID());
+					if (!isHuntTarget(livingVictim, mission)) {
+						return false; // El perro NO puede hacer daño a esqueletos, zombis, etc.
+					}
+				}
+			}
+			return true;
 		});
 
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
@@ -234,14 +230,11 @@ public class PerroCazadorMod implements ModInitializer {
 			pending.xp += 1 + dog.getRandom().nextInt(3);
 
 			if (mission == null) {
-				// Modo normal: presa por presa, vuelve a entregarla.
 				pending.delivering = true;
 			} else if (pending.has(mission.goal)) {
-				// Mision cumplida: ya tiene lo que le pediste, vuelve.
 				MISSIONS.remove(dog.getUUID());
 				pending.delivering = true;
 			}
-			// Si es una mision y aun no tiene el objetivo, sigue cazando exclusivamente eso.
 		});
 
 		ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
@@ -261,30 +254,11 @@ public class PerroCazadorMod implements ModInitializer {
 		});
 	}
 
-	/** 
-	 * Define que mobs son cazables. 
-	 * Si hay mision activa: SOLO el objetivo de la mision.
-	 * Si NO hay mision: SOLO cerdos y ovejas (PREY).
-	 */
 	private static boolean isHuntTarget(LivingEntity e, Mission mission) {
 		if (mission != null) {
 			return e.getType() == mission.target;
 		}
 		return PREY.contains(e.getType());
-	}
-
-	/**
-	 * Ignorar mobs con los que ya estamos peleando o que estan atacando al dueno o al perro:
-	 * esos los gestiona la IA vanilla de defensa del lobo, no la caza.
-	 */
-	private static boolean isEngagedWithUs(Mob e, Mob dog, ServerPlayer player) {
-		if (dog.getTarget() == e) {
-			return true;
-		}
-		if (e.getTarget() == player || e.getTarget() == dog) {
-			return true;
-		}
-		return false;
 	}
 
 	private static void tickPlayer(ServerPlayer player) {
@@ -326,7 +300,6 @@ public class PerroCazadorMod implements ModInitializer {
 		Pending pending = PENDING.get(id);
 		Mission mission = MISSIONS.get(id);
 
-		// Si lo mandas sentarse, suelta lo que lleve donde esta y se queda quieto.
 		if (tamable.isOrderedToSit()) {
 			if (pending != null) {
 				PENDING.remove(id);
@@ -336,7 +309,6 @@ public class PerroCazadorMod implements ModInitializer {
 			return;
 		}
 
-		// Solo se teletransporta si se aleja 88+ bloques y no esta peleando.
 		if ((dog.getTarget() == null || !dog.getTarget().isAlive())
 				&& dog.distanceTo(player) > LEASH_DISTANCE) {
 			dog.setTarget(null);
@@ -344,9 +316,10 @@ public class PerroCazadorMod implements ModInitializer {
 		}
 		double dist = dog.distanceTo(player);
 
-		// Entrega: vuelve andando y suelta el botin al suelo a pocos bloques de ti.
 		if (pending != null && pending.delivering) {
-			if (dist < DELIVER_DISTANCE) {
+			pending.deliverTicks++; // Aumentar el tiempo intentando entregar
+			// Si llega al jugador O si se atasca más de 30 segundos (600 ticks), suelta el objeto
+			if (dist < DELIVER_DISTANCE || pending.deliverTicks > 600) {
 				PENDING.remove(id);
 				dropPending(level, dog, pending, player);
 				report(dog, player, "Botin entregado");
@@ -358,20 +331,21 @@ public class PerroCazadorMod implements ModInitializer {
 			return;
 		}
 
-		// Si esta peleando (por ejemplo defendiendote), no interferir.
+		// Si tiene un objetivo inválido (esqueleto, zombi), lo borramos INMEDIATAMENTE sin congelar al perro
 		if (dog.getTarget() != null && dog.getTarget().isAlive()) {
-			report(dog, player, mission != null ? "Cazando (mision: " + mission.label + ")" : "Cazando");
-			return;
+			if (!isHuntTarget(dog.getTarget(), mission)) {
+				dog.setTarget(null);
+			} else {
+				report(dog, player, mission != null ? "Cazando (mision: " + mission.label + ")" : "Cazando");
+				return;
+			}
 		}
 
-		// Si esta herido, que descanse y te siga.
 		if (dog.getHealth() < dog.getMaxHealth() * 0.4f) {
 			report(dog, player, "Descansando (herido)");
 			return;
 		}
 
-		// Presas: Si hay mision, SOLO el objetivo. Si no, cerdos y ovejas.
-		// Se ignoran mobs con los que ya estamos peleando o que atacan al dueno/perro.
 		Mob prey = level.getEntitiesOfClass(Mob.class,
 				player.getBoundingBox().inflate(HUNT_RADIUS),
 				e -> isHuntTarget(e, mission)
@@ -379,8 +353,7 @@ public class PerroCazadorMod implements ModInitializer {
 						&& !e.isBaby()
 						&& !e.hasCustomName()
 						&& e != dog
-						&& e.distanceTo(player) <= HUNT_RADIUS
-						&& !isEngagedWithUs(e, dog, player))
+						&& e.distanceTo(player) <= HUNT_RADIUS)
 				.stream()
 				.min(Comparator.comparingDouble(e -> e.distanceToSqr(dog)))
 				.orElse(null);
