@@ -41,582 +41,578 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.phys.Vec3;
 
 public class PerroCazadorMod implements ModInitializer {
-	public static final String MOD_ID = "perro_cazador";
-	public static final String HUNTER_TAG = "perro_cazador";
+    public static final String MOD_ID = "perro_cazador";
+    public static final String HUNTER_TAG = "perro_cazador";
 
-	private static final Set<EntityType<?>> PREY = Set.of(EntityType.PIG, EntityType.SHEEP, EntityType.CHICKEN);
+    private static final Set<EntityType<?>> PREY = Set.of(EntityType.PIG, EntityType.SHEEP, EntityType.CHICKEN);
 
-	private static final double HUNT_RADIUS = 128.0; 
-	private static final double LEASH_DISTANCE = 144.0; 
-	
-	private static final double TELEPORT_MIN = 8.0;
-	private static final double TELEPORT_MAX = 12.0;
+    private static final double HUNT_RADIUS = 128.0;
+    private static final double LEASH_DISTANCE = 144.0;
+    private static final double TELEPORT_MIN = 8.0;
+    private static final double TELEPORT_MAX = 12.0;
+    private static final double FOLLOW_RANGE = 160.0;
+    private static final double DELIVER_DISTANCE = 3.0;
+    private static final double MAX_Y_DIFF = 4.0;
 
-	private static final double FOLLOW_RANGE = 160.0; 
-	private static final double DELIVER_DISTANCE = 3.0;
-	
-	// NUEVO: Diferencia máxima de altura para perseguir a una presa
-	private static final double MAX_Y_DIFF = 4.0;
+    private enum Mission {
+        ENDERMAN(EntityType.ENDERMAN, Items.ENDER_PEARL, Items.ENDER_PEARL, "endermans"),
+        PIG(EntityType.PIG, Items.PORKCHOP, Items.PORKCHOP, "cerdos"),
+        SHEEP(EntityType.SHEEP, Items.MUTTON, Items.MUTTON, "ovejas"),
+        CHICKEN(EntityType.CHICKEN, Items.CHICKEN, Items.CHICKEN, "pollos");
 
-	private enum Mission {
-		ENDERMAN(EntityType.ENDERMAN, Items.ENDER_PEARL, Items.ENDER_PEARL, "endermans"),
-		PIG(EntityType.PIG, Items.PORKCHOP, Items.PORKCHOP, "cerdos"),
-		SHEEP(EntityType.SHEEP, Items.MUTTON, Items.MUTTON, "ovejas"),
-		CHICKEN(EntityType.CHICKEN, Items.CHICKEN, Items.CHICKEN, "pollos");
+        final EntityType<?> target;
+        final Item trigger;
+        final Item goal;
+        final String label;
 
-		final EntityType<?> target;
-		final Item trigger;
-		final Item goal;
-		final String label;
+        Mission(EntityType<?> target, Item trigger, Item goal, String label) {
+            this.target = target;
+            this.trigger = trigger;
+            this.goal = goal;
+            this.label = label;
+        }
 
-		Mission(EntityType<?> target, Item trigger, Item goal, String label) {
-			this.target = target;
-			this.trigger = trigger;
-			this.goal = goal;
-			this.label = label;
-		}
+        static Mission fromStack(ItemStack stack) {
+            for (Mission m : values()) {
+                if (stack.is(m.trigger)) {
+                    return m;
+                }
+            }
+            return null;
+        }
+    }
 
-		static Mission fromStack(ItemStack stack) {
-			for (Mission m : values()) {
-				if (stack.is(m.trigger)) {
-					return m;
-				}
-			}
-			return null;
-		}
-	}
+    private static final class Pending {
+        final List<ItemStack> items = new ArrayList<>();
+        int xp;
+        boolean delivering;
+        int deliverTicks = 0;
 
-	private static final class Pending {
-		final List<ItemStack> items = new ArrayList<>();
-		int xp;
-		boolean delivering;
-		int deliverTicks = 0;
+        boolean has(Item item) {
+            for (ItemStack stack : items) {
+                if (!stack.isEmpty() && stack.is(item)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
 
-		boolean has(Item item) {
-			for (ItemStack stack : items) {
-				if (!stack.isEmpty() && stack.is(item)) {
-					return true;
-				}
-			}
-			return false;
-		}
-	}
+    private static final class DogInfo {
+        final UUID owner;
+        byte state = DogsPayload.ALIVE;
+        String name = "Perro";
+        double x, y, z;
+        float health, maxHealth;
+        String dim = "";
+        String activity = "";
 
-	private static final class DogInfo {
-		final UUID owner;
-		byte state = DogsPayload.ALIVE;
-		String name = "Perro";
-		double x, y, z;
-		float health, maxHealth;
-		String dim = "";
-		String activity = "";
+        DogInfo(UUID owner) {
+            this.owner = owner;
+        }
+    }
 
-		DogInfo(UUID owner) {
-			this.owner = owner;
-		}
-	}
+    private record TicketData(ServerLevel level, ChunkPos pos) {}
 
-	private record TicketData(ServerLevel level, ChunkPos pos) {}
+    private static final Map<UUID, Pending> PENDING = new HashMap<>();
+    private static final Map<UUID, Mission> MISSIONS = new HashMap<>();
+    private static final Map<UUID, DogInfo> STATUS = new HashMap<>();
+    private static final Set<UUID> HUD_ACTIVE = new HashSet<>();
+    private static final Set<UUID> RECALLING = new HashSet<>();
+    private static final Map<UUID, TicketData> ACTIVE_TICKETS = new HashMap<>();
 
-	private static final Map<UUID, Pending> PENDING = new HashMap<>();
-	private static final Map<UUID, Mission> MISSIONS = new HashMap<>();
-	private static final Map<UUID, DogInfo> STATUS = new HashMap<>();
-	private static final Set<UUID> HUD_ACTIVE = new HashSet<>();
-	private static final Set<UUID> RECALLING = new HashSet<>();
-	private static final Map<UUID, TicketData> ACTIVE_TICKETS = new HashMap<>();
+    @Override
+    public void onInitialize() {
+        PayloadTypeRegistry.playS2C().register(DogsPayload.TYPE, DogsPayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(RecallPayload.TYPE, RecallPayload.CODEC);
 
-	@Override
-	public void onInitialize() {
-		PayloadTypeRegistry.playS2C().register(DogsPayload.TYPE, DogsPayload.CODEC);
-		PayloadTypeRegistry.playC2S().register(RecallPayload.TYPE, RecallPayload.CODEC);
+        ServerPlayNetworking.registerGlobalReceiver(RecallPayload.TYPE, (payload, context) -> {
+            ServerPlayer player = context.player();
+            ServerLevel level = (ServerLevel) player.level();
+            List<Mob> dogs = level.getEntitiesOfClass(Mob.class,
+                    player.getBoundingBox().inflate(LEASH_DISTANCE + 64),
+                    e -> e instanceof TamableAnimal t && e.getType() == EntityType.WOLF
+                            && t.isTame() && t.isOwnedBy(player) && e.getTags().contains(HUNTER_TAG));
+            for (Mob dog : dogs) {
+                RECALLING.add(dog.getUUID());
+                TamableAnimal tamable = (TamableAnimal) dog;
+                if (tamable.isOrderedToSit()) {
+                    tamable.setOrderedToSit(false);
+                }
+                dog.setTarget(null);
+                removeTicket(dog.getUUID());
+            }
+        });
 
-		ServerPlayNetworking.registerGlobalReceiver(RecallPayload.TYPE, (payload, context) -> {
-			ServerPlayer player = context.player();
-			ServerLevel level = (ServerLevel) player.level();
-			List<Mob> dogs = level.getEntitiesOfClass(Mob.class,
-					player.getBoundingBox().inflate(LEASH_DISTANCE + 64),
-					e -> e instanceof TamableAnimal t && e.getType() == EntityType.WOLF
-							&& t.isTame() && t.isOwnedBy(player) && e.getTags().contains(HUNTER_TAG));
-			for (Mob dog : dogs) {
-				RECALLING.add(dog.getUUID());
-				TamableAnimal tamable = (TamableAnimal) dog;
-				if (tamable.isOrderedToSit()) {
-					tamable.setOrderedToSit(false);
-				}
-				dog.setTarget(null);
-				removeTicket(dog.getUUID());
-			}
-		});
+        UseEntityCallback.EVENT.register((player, level, hand, entity, hitResult) -> {
+            if (!(entity instanceof TamableAnimal dog) || dog.getType() != EntityType.WOLF
+                    || !dog.isTame() || !dog.isOwnedBy(player)) {
+                return InteractionResult.PASS;
+            }
+            ItemStack held = player.getItemInHand(hand);
 
-		UseEntityCallback.EVENT.register((player, level, hand, entity, hitResult) -> {
-			if (!(entity instanceof TamableAnimal dog) || dog.getType() != EntityType.WOLF
-					|| !dog.isTame() || !dog.isOwnedBy(player)) {
-				return InteractionResult.PASS;
-			}
-			ItemStack held = player.getItemInHand(hand);
+            if (dog.getHealth() < dog.getMaxHealth() && dog.isFood(held)) {
+                return InteractionResult.PASS;
+            }
 
-			if (dog.getHealth() < dog.getMaxHealth() && dog.isFood(held)) {
-				return InteractionResult.PASS; 
-			}
+            if (player.isShiftKeyDown() && held.is(Items.BONE)) {
+                if (!level.isClientSide()) {
+                    UUID id = dog.getUUID();
+                    if (dog.getTags().contains(HUNTER_TAG)) {
+                        dog.removeTag(HUNTER_TAG);
+                        dog.setTarget(null);
+                        MISSIONS.remove(id);
+                        STATUS.remove(id);
+                        RECALLING.remove(id);
+                        removeTicket(id);
+                        Pending carried = PENDING.remove(id);
+                        if (carried != null && level instanceof ServerLevel serverLevel) {
+                            dropPending(serverLevel, dog, carried, player);
+                        }
+                        player.displayClientMessage(Component.literal("Tu perro ya no caza."), true);
+                    } else {
+                        dog.addTag(HUNTER_TAG);
+                        STATUS.put(id, new DogInfo(player.getUUID()));
+                        sendStatus((ServerPlayer) player);
+                        player.displayClientMessage(Component.literal("¡Tu perro ahora es cazador!"), true);
+                    }
+                }
+                return InteractionResult.SUCCESS;
+            }
 
-			if (player.isShiftKeyDown() && held.is(Items.BONE)) {
-				if (!level.isClientSide()) {
-					UUID id = dog.getUUID();
-					if (dog.getTags().contains(HUNTER_TAG)) {
-						dog.removeTag(HUNTER_TAG);
-						dog.setTarget(null);
-						MISSIONS.remove(id);
-						STATUS.remove(id);
-						RECALLING.remove(id);
-						removeTicket(id);
-						Pending carried = PENDING.remove(id);
-						if (carried != null && level instanceof ServerLevel serverLevel) {
-							dropPending(serverLevel, dog, carried, player);
-						}
-						player.displayClientMessage(Component.literal("Tu perro ya no caza."), true);
-					} else {
-						dog.addTag(HUNTER_TAG);
-						STATUS.put(id, new DogInfo(player.getUUID()));
-						sendStatus((ServerPlayer) player);
-						player.displayClientMessage(Component.literal("¡Tu perro ahora es cazador!"), true);
-					}
-				}
-				return InteractionResult.SUCCESS;
-			}
+            if (!player.isShiftKeyDown() && dog.getTags().contains(HUNTER_TAG)) {
+                Mission mission = Mission.fromStack(held);
+                if (mission != null) {
+                    if (!level.isClientSide()) {
+                        MISSIONS.put(dog.getUUID(), mission);
+                        dog.setTarget(null);
+                        player.displayClientMessage(Component.literal(
+                                "Tu perro ira exclusivamente a por " + mission.label + " cuando se levante."), true);
+                    }
+                    return InteractionResult.SUCCESS;
+                }
+            }
+            return InteractionResult.PASS;
+        });
 
-			if (!player.isShiftKeyDown() && dog.getTags().contains(HUNTER_TAG)) {
-				Mission mission = Mission.fromStack(held);
-				if (mission != null) {
-					if (!level.isClientSide()) {
-						MISSIONS.put(dog.getUUID(), mission);
-						dog.setTarget(null);
-						player.displayClientMessage(Component.literal(
-								"Tu perro ira exclusivamente a por " + mission.label + " cuando se levante."), true);
-					}
-					return InteractionResult.SUCCESS;
-				}
-			}
-			return InteractionResult.PASS;
-		});
+        ServerLivingEntityEvents.ALLOW_DAMAGE.register((entity, source, amount) -> {
+            if (entity instanceof TamableAnimal dog && dog.getTags().contains(HUNTER_TAG)) {
+                if (source.getEntity() instanceof EnderMan) {
+                    return false;
+                }
+            }
 
-		ServerLivingEntityEvents.ALLOW_DAMAGE.register((entity, source, amount) -> {
-			if (entity instanceof TamableAnimal dog && dog.getTags().contains(HUNTER_TAG)) {
-				if (source.getEntity() instanceof EnderMan) {
-					return false; 
-				}
-			}
+            Entity attacker = source.getEntity();
+            if (attacker instanceof TamableAnimal dog && dog.getTags().contains(HUNTER_TAG)) {
+                if (entity instanceof LivingEntity livingVictim) {
+                    Mission mission = MISSIONS.get(dog.getUUID());
+                    if (!isHuntTarget(livingVictim, mission)) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        });
 
-			Entity attacker = source.getEntity();
-			if (attacker instanceof TamableAnimal dog && dog.getTags().contains(HUNTER_TAG)) {
-				if (entity instanceof LivingEntity livingVictim) {
-					Mission mission = MISSIONS.get(dog.getUUID());
-					if (!isHuntTarget(livingVictim, mission)) {
-						return false;
-					}
-				}
-			}
-			return true;
-		});
+        ServerTickEvents.END_SERVER_TICK.register(server -> {
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                if (player.isSpectator() || !player.isAlive()) {
+                    continue;
+                }
 
-		ServerTickEvents.END_SERVER_TICK.register(server -> {
-			for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-				if (player.isSpectator() || !player.isAlive()) {
-					continue;
-				}
-				
-				tickPlayerAI(player);
+                tickPlayerAI(player);
 
-				if (server.getTickCount() % 5 == 0) {
-					sendStatus(player);
-				}
-			}
-		});
+                if (server.getTickCount() % 5 == 0) {
+                    sendStatus(player);
+                }
+            }
+        });
 
-		ServerLivingEntityEvents.AFTER_DEATH.register((victim, source) -> {
-			UUID victimId = victim.getUUID();
+        ServerLivingEntityEvents.AFTER_DEATH.register((victim, source) -> {
+            UUID victimId = victim.getUUID();
 
-			if (victim instanceof TamableAnimal && victim.getTags().contains(HUNTER_TAG)) {
-				STATUS.remove(victimId);
-				MISSIONS.remove(victimId);
-				RECALLING.remove(victimId);
-				removeTicket(victimId);
-			}
+            if (victim instanceof TamableAnimal && victim.getTags().contains(HUNTER_TAG)) {
+                STATUS.remove(victimId);
+                MISSIONS.remove(victimId);
+                RECALLING.remove(victimId);
+                removeTicket(victimId);
+            }
 
-			Pending carried = PENDING.remove(victimId);
-			if (carried != null && victim.level() instanceof ServerLevel deathLevel) {
-				dropPending(deathLevel, victim, carried, null);
-			}
+            Pending carried = PENDING.remove(victimId);
+            if (carried != null && victim.level() instanceof ServerLevel deathLevel) {
+                dropPending(deathLevel, victim, carried, null);
+            }
 
-			Entity killer = source.getEntity();
-			if (!(killer instanceof TamableAnimal dog) || !dog.getTags().contains(HUNTER_TAG)) {
-				return;
-			}
-			Mission mission = MISSIONS.get(dog.getUUID());
-			boolean wanted = isHuntTarget(victim, mission);
-			if (!wanted || !(victim.level() instanceof ServerLevel level)) {
-				return;
-			}
+            Entity killer = source.getEntity();
+            if (!(killer instanceof TamableAnimal dog) || !dog.getTags().contains(HUNTER_TAG)) {
+                return;
+            }
+            Mission mission = MISSIONS.get(dog.getUUID());
+            boolean wanted = isHuntTarget(victim, mission);
+            if (!wanted || !(victim.level() instanceof ServerLevel level)) {
+                return;
+            }
 
-			Pending pending = PENDING.computeIfAbsent(dog.getUUID(), k -> new Pending());
-			collectLoot(level, victim, pending);
+            Pending pending = PENDING.computeIfAbsent(dog.getUUID(), k -> new Pending());
+            collectLoot(level, victim, pending);
 
-			if (pending.items.size() >= 16) {
-				pending.delivering = true;
-			}
-			if (mission != null) {
-				if (pending.has(mission.goal)) {
-					MISSIONS.remove(dog.getUUID());
-					pending.delivering = true;
-				}
-			}
-		});
+            if (pending.items.size() >= 16) {
+                pending.delivering = true;
+            }
+            if (mission != null) {
+                if (pending.has(mission.goal)) {
+                    MISSIONS.remove(dog.getUUID());
+                    pending.delivering = true;
+                }
+            }
+        });
 
-		ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
-			for (UUID id : new ArrayList<>(ACTIVE_TICKETS.keySet())) {
-				removeTicket(id);
-			}
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
+            for (UUID id : new ArrayList<>(ACTIVE_TICKETS.keySet())) {
+                removeTicket(id);
+            }
 
-			for (Map.Entry<UUID, Pending> entry : new ArrayList<>(PENDING.entrySet())) {
-				for (ServerLevel level : server.getAllLevels()) {
-					Entity dog = level.getEntity(entry.getKey());
-					if (dog != null) {
-						dropPending(level, dog, entry.getValue(), null);
-						break;
-					}
-				}
-			}
-			PENDING.clear();
-			MISSIONS.clear();
-			STATUS.clear();
-			HUD_ACTIVE.clear();
-			RECALLING.clear();
-		});
-	}
+            for (Map.Entry<UUID, Pending> entry : new ArrayList<>(PENDING.entrySet())) {
+                for (ServerLevel level : server.getAllLevels()) {
+                    Entity dog = level.getEntity(entry.getKey());
+                    if (dog != null) {
+                        dropPending(level, dog, entry.getValue(), null);
+                        break;
+                    }
+                }
+            }
+            PENDING.clear();
+            MISSIONS.clear();
+            STATUS.clear();
+            HUD_ACTIVE.clear();
+            RECALLING.clear();
+        });
+    }
 
-	private static void removeTicket(UUID id) {
-		TicketData data = ACTIVE_TICKETS.remove(id);
-		if (data != null) {
-			data.level().getChunkSource().removeRegionTicket(TicketType.FORCED, data.pos(), 3, Unit.INSTANCE);
-		}
-	}
+    private static void removeTicket(UUID id) {
+        TicketData data = ACTIVE_TICKETS.remove(id);
+        if (data != null) {
+            data.level().getChunkSource().removeTicketWithRadius(TicketType.FORCED, data.pos(), 3);
+        }
+    }
 
-	private static boolean isHuntTarget(LivingEntity e, Mission mission) {
-		if (mission != null) {
-			return e.getType() == mission.target;
-		}
-		return PREY.contains(e.getType());
-	}
+    private static boolean isHuntTarget(LivingEntity e, Mission mission) {
+        if (mission != null) {
+            return e.getType() == mission.target;
+        }
+        return PREY.contains(e.getType());
+    }
 
-	public static boolean isHuntTargetStatic(LivingEntity e, UUID dogId) {
-		Mission mission = MISSIONS.get(dogId);
-		return isHuntTarget(e, mission);
-	}
+    public static boolean isHuntTargetStatic(LivingEntity e, UUID dogId) {
+        Mission mission = MISSIONS.get(dogId);
+        return isHuntTarget(e, mission);
+    }
 
-	private static void tickPlayerAI(ServerPlayer player) {
-		ServerLevel level = (ServerLevel) player.level();
-		
-		STATUS.entrySet().removeIf(entry -> 
-				entry.getValue().owner.equals(player.getUUID()) 
-				&& entry.getValue().state == DogsPayload.DEAD
-		);
+    private static void tickPlayerAI(ServerPlayer player) {
+        ServerLevel level = (ServerLevel) player.level();
 
-		List<Mob> dogs = level.getEntitiesOfClass(Mob.class,
-				player.getBoundingBox().inflate(LEASH_DISTANCE + 64),
-				e -> e instanceof TamableAnimal t
-						&& e.getType() == EntityType.WOLF
-						&& t.isTame()
-						&& t.isAlive()
-						&& t.isOwnedBy(player)
-						&& e.getTags().contains(HUNTER_TAG));
+        STATUS.entrySet().removeIf(entry ->
+                entry.getValue().owner.equals(player.getUUID())
+                        && entry.getValue().state == DogsPayload.DEAD
+        );
 
-		Set<UUID> seen = new HashSet<>();
-		for (Mob dog : dogs) {
-			seen.add(dog.getUUID());
-			processDog(level, player, dog);
-		}
+        List<Mob> dogs = level.getEntitiesOfClass(Mob.class,
+                player.getBoundingBox().inflate(LEASH_DISTANCE + 64),
+                e -> e instanceof TamableAnimal t
+                        && e.getType() == EntityType.WOLF
+                        && t.isTame()
+                        && t.isAlive()
+                        && t.isOwnedBy(player)
+                        && e.getTags().contains(HUNTER_TAG));
 
-		for (Map.Entry<UUID, DogInfo> entry : STATUS.entrySet()) {
-			DogInfo info = entry.getValue();
-			if (info.owner.equals(player.getUUID()) && info.state != DogsPayload.DEAD
-					&& !seen.contains(entry.getKey())) {
-				info.state = DogsPayload.FAR;
-				info.activity = "Fuera de la zona cargada";
-			}
-		}
-	}
+        Set<UUID> seen = new HashSet<>();
+        for (Mob dog : dogs) {
+            seen.add(dog.getUUID());
+            processDog(level, player, dog);
+        }
 
-	private static void processDog(ServerLevel level, ServerPlayer player, Mob dog) {
-		TamableAnimal tamable = (TamableAnimal) dog;
-		UUID id = dog.getUUID();
+        for (Map.Entry<UUID, DogInfo> entry : STATUS.entrySet()) {
+            DogInfo info = entry.getValue();
+            if (info.owner.equals(player.getUUID()) && info.state != DogsPayload.DEAD
+                    && !seen.contains(entry.getKey())) {
+                info.state = DogsPayload.FAR;
+                info.activity = "Fuera de la zona cargada";
+            }
+        }
+    }
 
-		updateDogInfo(dog, player);
+    private static void processDog(ServerLevel level, ServerPlayer player, Mob dog) {
+        TamableAnimal tamable = (TamableAnimal) dog;
+        UUID id = dog.getUUID();
 
-		AttributeInstance range = dog.getAttribute(Attributes.FOLLOW_RANGE);
-		if (range != null && range.getBaseValue() < FOLLOW_RANGE) {
-			range.setBaseValue(FOLLOW_RANGE);
-		}
+        updateDogInfo(dog, player);
 
-		Pending pending = PENDING.get(id);
-		Mission mission = MISSIONS.get(id);
-		double dist = dog.distanceTo(player);
+        AttributeInstance range = dog.getAttribute(Attributes.FOLLOW_RANGE);
+        if (range != null && range.getBaseValue() < FOLLOW_RANGE) {
+            range.setBaseValue(FOLLOW_RANGE);
+        }
 
-		// REGLA ANTICAÍDAS: Si está cayendo, en lava, o a punto de ahogarse, salvarlo.
-		if (dog.fallDistance > 3.0 || dog.isInLava() || (dog.isInWater() && dog.getAirSupply() < 50)) {
-			teleportNearOwner(level, dog, player);
-			setActivity(dog, "Rescatado");
-			return;
-		}
+        Pending pending = PENDING.get(id);
+        Mission mission = MISSIONS.get(id);
+        double dist = dog.distanceTo(player);
 
-		// --- GESTIÓN DE CARGA DE CHUNKS (MÁX 2 PERROS) ---
-		if (dist > 64.0) {
-			if (!ACTIVE_TICKETS.containsKey(id)) {
-				if (ACTIVE_TICKETS.size() < 2) {
-					ChunkPos currentChunk = new ChunkPos(dog.blockPosition());
-					ACTIVE_TICKETS.put(id, new TicketData(level, currentChunk));
-					level.getChunkSource().addRegionTicket(TicketType.FORCED, currentChunk, 3, Unit.INSTANCE);
-				} else {
-					if (dog.getTarget() != null) {
-						dog.setTarget(null);
-						dog.setLastHurtByMob(null); 
-					}
-					if (dog.getNavigation().isDone()) {
-						dog.getNavigation().moveTo(player, 1.2);
-					}
-					setActivity(dog, "Volviendo (limite chunks)");
-					return;
-				}
-			} else {
-				TicketData data = ACTIVE_TICKETS.get(id);
-				ChunkPos currentChunk = new ChunkPos(dog.blockPosition());
-				if (data.pos().x != currentChunk.x || data.pos().z != currentChunk.z) {
-					data.level().getChunkSource().removeRegionTicket(TicketType.FORCED, data.pos(), 3, Unit.INSTANCE);
-					level.getChunkSource().addRegionTicket(TicketType.FORCED, currentChunk, 3, Unit.INSTANCE);
-					ACTIVE_TICKETS.put(id, new TicketData(level, currentChunk));
-				}
-			}
-		} else if (dist < 48.0) {
-			removeTicket(id);
-		}
+        if (dog.fallDistance > 3.0 || dog.isInLava() || (dog.isInWater() && dog.getAirSupply() < 50)) {
+            teleportNearOwner(level, dog, player);
+            setActivity(dog, "Rescatado");
+            return;
+        }
 
-		if (RECALLING.contains(id)) {
-			if (dog.distanceTo(player) < DELIVER_DISTANCE) {
-				tamable.setOrderedToSit(true);
-				RECALLING.remove(id);
-				MISSIONS.remove(id);
-				removeTicket(id);
-				if (pending != null) {
-					PENDING.remove(id);
-					dropPending(level, dog, pending, player);
-				}
-				setActivity(dog, "Sentado (Llamado)");
-			} else {
-				if ((dog.getTarget() == null || !dog.getTarget().isAlive()) && dog.distanceTo(player) > LEASH_DISTANCE) {
-					dog.setTarget(null);
-					teleportNearOwner(level, dog, player);
-				} else {
-					dog.setTarget(null);
-					if (dog.getNavigation().isDone()) dog.getNavigation().moveTo(player, 1.2);
-				}
-				setActivity(dog, "Volviendo al dueno");
-			}
-			return;
-		}
+        if (dist > 64.0) {
+            if (!ACTIVE_TICKETS.containsKey(id)) {
+                if (ACTIVE_TICKETS.size() < 2) {
+                    ChunkPos currentChunk = new ChunkPos(dog.blockPosition());
+                    ACTIVE_TICKETS.put(id, new TicketData(level, currentChunk));
+                    level.getChunkSource().addTicketWithRadius(TicketType.FORCED, currentChunk, 3);
+                } else {
+                    if (dog.getTarget() != null) {
+                        dog.setTarget(null);
+                        dog.setLastHurtByMob(null);
+                    }
+                    if (dog.getNavigation().isDone()) {
+                        dog.getNavigation().moveTo(player, 1.2);
+                    }
+                    setActivity(dog, "Volviendo (limite chunks)");
+                    return;
+                }
+            } else {
+                TicketData data = ACTIVE_TICKETS.get(id);
+                ChunkPos currentChunk = new ChunkPos(dog.blockPosition());
+                if (data.pos().x != currentChunk.x || data.pos().z != currentChunk.z) {
+                    data.level().getChunkSource().removeTicketWithRadius(TicketType.FORCED, data.pos(), 3);
+                    level.getChunkSource().addTicketWithRadius(TicketType.FORCED, currentChunk, 3);
+                    ACTIVE_TICKETS.put(id, new TicketData(level, currentChunk));
+                }
+            }
+        } else if (dist < 48.0) {
+            removeTicket(id);
+        }
 
-		if (tamable.isOrderedToSit()) {
-			removeTicket(id);
-			if (pending != null) {
-				PENDING.remove(id);
-				dropPending(level, dog, pending, player);
-			}
-			if (mission != null) {
-				setActivity(dog, "Sentado (Mision: " + mission.label + ")");
-			} else {
-				setActivity(dog, "Sentado");
-			}
-			return;
-		}
+        if (RECALLING.contains(id)) {
+            if (dog.distanceTo(player) < DELIVER_DISTANCE) {
+                tamable.setOrderedToSit(true);
+                RECALLING.remove(id);
+                MISSIONS.remove(id);
+                removeTicket(id);
+                if (pending != null) {
+                    PENDING.remove(id);
+                    dropPending(level, dog, pending, player);
+                }
+                setActivity(dog, "Sentado (Llamado)");
+            } else {
+                if ((dog.getTarget() == null || !dog.getTarget().isAlive()) && dog.distanceTo(player) > LEASH_DISTANCE) {
+                    dog.setTarget(null);
+                    teleportNearOwner(level, dog, player);
+                } else {
+                    dog.setTarget(null);
+                    if (dog.getNavigation().isDone()) dog.getNavigation().moveTo(player, 1.2);
+                }
+                setActivity(dog, "Volviendo al dueno");
+            }
+            return;
+        }
 
-		if ((dog.getTarget() == null || !dog.getTarget().isAlive())
-				&& dog.distanceTo(player) > LEASH_DISTANCE) {
-			dog.setTarget(null);
-			teleportNearOwner(level, dog, player);
-		}
+        if (tamable.isOrderedToSit()) {
+            removeTicket(id);
+            if (pending != null) {
+                PENDING.remove(id);
+                dropPending(level, dog, pending, player);
+            }
+            if (mission != null) {
+                setActivity(dog, "Sentado (Mision: " + mission.label + ")");
+            } else {
+                setActivity(dog, "Sentado");
+            }
+            return;
+        }
 
-		if (pending != null && pending.delivering) {
-			pending.deliverTicks++;
-			if (dist < DELIVER_DISTANCE || pending.deliverTicks > 600) {
-				PENDING.remove(id);
-				dropPending(level, dog, pending, player);
-				setActivity(dog, "Botin entregado");
-				removeTicket(id);
-			} else {
-				dog.setTarget(null);
-				dog.getNavigation().moveTo(player, 1.3);
-				setActivity(dog, "Trayendote el botin");
-			}
-			return;
-		}
+        if ((dog.getTarget() == null || !dog.getTarget().isAlive())
+                && dog.distanceTo(player) > LEASH_DISTANCE) {
+            dog.setTarget(null);
+            teleportNearOwner(level, dog, player);
+        }
 
-		if (dog.getTarget() != null && dog.getTarget().isAlive()) {
-			// REGLA DE SEGURIDAD VERTICAL: Si la presa está muy arriba o muy abajo, la ignoramos.
-			if (Math.abs(dog.getTarget().getY() - dog.getY()) > MAX_Y_DIFF) {
-				dog.setTarget(null);
-				dog.setLastHurtByMob(null); 
-			} else if (!isHuntTarget(dog.getTarget(), mission)) {
-				dog.setTarget(null);
-				dog.setLastHurtByMob(null); 
-			} else {
-				setActivity(dog, mission != null ? "Cazando (mision: " + mission.label + ")" : "Cazando");
-				return;
-			}
-		}
+        if (pending != null && pending.delivering) {
+            pending.deliverTicks++;
+            if (dist < DELIVER_DISTANCE || pending.deliverTicks > 600) {
+                PENDING.remove(id);
+                dropPending(level, dog, pending, player);
+                setActivity(dog, "Botin entregado");
+                removeTicket(id);
+            } else {
+                dog.setTarget(null);
+                dog.getNavigation().moveTo(player, 1.3);
+                setActivity(dog, "Trayendote el botin");
+            }
+            return;
+        }
 
-		if (dog.getHealth() < dog.getMaxHealth() * 0.4f) {
-			setActivity(dog, "Descansando (herido)");
-			if (dist > 10.0 && dog.getNavigation().isDone()) {
-				dog.getNavigation().moveTo(player, 1.2);
-			}
-			return;
-		}
+        if (dog.getTarget() != null && dog.getTarget().isAlive()) {
+            if (Math.abs(dog.getTarget().getY() - dog.getY()) > MAX_Y_DIFF) {
+                dog.setTarget(null);
+                dog.setLastHurtByMob(null);
+            } else if (!isHuntTarget(dog.getTarget(), mission)) {
+                dog.setTarget(null);
+                dog.setLastHurtByMob(null);
+            } else {
+                setActivity(dog, mission != null ? "Cazando (mision: " + mission.label + ")" : "Cazando");
+                return;
+            }
+        }
 
-		// BÚSQUEDA DE PRESAS: Añadido el filtro de altura (MAX_Y_DIFF)
-		Mob prey = level.getEntitiesOfClass(Mob.class,
-				player.getBoundingBox().inflate(HUNT_RADIUS),
-				e -> isHuntTarget(e, mission)
-						&& e.isAlive()
-						&& !e.isBaby()
-						&& !e.hasCustomName()
-						&& e != dog
-						&& e.distanceTo(player) <= HUNT_RADIUS
-						&& Math.abs(e.getY() - dog.getY()) <= MAX_Y_DIFF) // <--- FILTRO DE ALTURA
-				.stream()
-				.min(Comparator.comparingDouble(e -> e.distanceToSqr(dog)))
-				.orElse(null);
+        if (dog.getHealth() < dog.getMaxHealth() * 0.4f) {
+            setActivity(dog, "Descansando (herido)");
+            if (dist > 10.0 && dog.getNavigation().isDone()) {
+                dog.getNavigation().moveTo(player, 1.2);
+            }
+            return;
+        }
 
-		if (prey != null) {
-			dog.setTarget(prey);
-			setActivity(dog, mission != null ? "Cazando (mision: " + mission.label + ")" : "Cazando");
-		} else if (mission != null) {
-			MISSIONS.remove(id);
-			player.displayClientMessage(Component.literal(
-					"No hay " + mission.label + " cerca o estan en un sitio inaccesible. Mision cancelada."), true);
-			if (dist > 10.0 && dog.getNavigation().isDone()) {
-				dog.getNavigation().moveTo(player, 1.2);
-			}
-			setActivity(dog, "Siguiendote");
-		} else {
-			if (dist > 10.0 && dog.getNavigation().isDone()) {
-				dog.getNavigation().moveTo(player, 1.2);
-			}
-			setActivity(dog, "Siguiendote");
-		}
-	}
+        Mob prey = level.getEntitiesOfClass(Mob.class,
+                player.getBoundingBox().inflate(HUNT_RADIUS),
+                e -> isHuntTarget(e, mission)
+                        && e.isAlive()
+                        && !e.isBaby()
+                        && !e.hasCustomName()
+                        && e != dog
+                        && e.distanceTo(player) <= HUNT_RADIUS
+                        && Math.abs(e.getY() - dog.getY()) <= MAX_Y_DIFF)
+                .stream()
+                .min(Comparator.comparingDouble(e -> e.distanceToSqr(dog)))
+                .orElse(null);
 
-	private static void updateDogInfo(Mob dog, ServerPlayer player) {
-		DogInfo info = STATUS.computeIfAbsent(dog.getUUID(), k -> new DogInfo(player.getUUID()));
-		info.state = DogsPayload.ALIVE;
-		info.name = dog.hasCustomName() ? dog.getName().getString() : "Perro";
-		info.x = dog.getX();
-		info.y = dog.getY();
-		info.z = dog.getZ();
-		info.health = dog.getHealth();
-		info.maxHealth = dog.getMaxHealth();
-		info.dim = dog.level().dimension().toString();
-	}
+        if (prey != null) {
+            dog.setTarget(prey);
+            setActivity(dog, mission != null ? "Cazando (mision: " + mission.label + ")" : "Cazando");
+        } else if (mission != null) {
+            MISSIONS.remove(id);
+            player.displayClientMessage(Component.literal(
+                    "No hay " + mission.label + " cerca o estan en un sitio inaccesible. Mision cancelada."), true);
+            if (dist > 10.0 && dog.getNavigation().isDone()) {
+                dog.getNavigation().moveTo(player, 1.2);
+            }
+            setActivity(dog, "Siguiendote");
+        } else {
+            if (dist > 10.0 && dog.getNavigation().isDone()) {
+                dog.getNavigation().moveTo(player, 1.2);
+            }
+            setActivity(dog, "Siguiendote");
+        }
+    }
 
-	private static void setActivity(Mob dog, String activity) {
-		DogInfo info = STATUS.get(dog.getUUID());
-		if (info != null) {
-			info.activity = activity;
-		}
-	}
+    private static void updateDogInfo(Mob dog, ServerPlayer player) {
+        DogInfo info = STATUS.computeIfAbsent(dog.getUUID(), k -> new DogInfo(player.getUUID()));
+        info.state = DogsPayload.ALIVE;
+        info.name = dog.hasCustomName() ? dog.getName().getString() : "Perro";
+        info.x = dog.getX();
+        info.y = dog.getY();
+        info.z = dog.getZ();
+        info.health = dog.getHealth();
+        info.maxHealth = dog.getMaxHealth();
+        info.dim = dog.level().dimension().toString();
+    }
 
-	private static void sendStatus(ServerPlayer player) {
-		List<DogsPayload.Entry> list = new ArrayList<>();
-		for (DogInfo i : STATUS.values()) {
-			if (i.owner.equals(player.getUUID())) {
-				list.add(new DogsPayload.Entry(i.name, i.state, i.x, i.y, i.z,
-						i.health, i.maxHealth, i.dim, i.activity, 0)); 
-			}
-		}
-		boolean had = HUD_ACTIVE.contains(player.getUUID());
-		if (list.isEmpty() && !had) {
-			return;
-		}
-		if (list.isEmpty()) {
-			HUD_ACTIVE.remove(player.getUUID());
-		} else {
-			HUD_ACTIVE.add(player.getUUID());
-		}
-		ServerPlayNetworking.send(player, new DogsPayload(list));
-	}
+    private static void setActivity(Mob dog, String activity) {
+        DogInfo info = STATUS.get(dog.getUUID());
+        if (info != null) {
+            info.activity = activity;
+        }
+    }
 
-	private static boolean teleportNearOwner(ServerLevel level, Mob dog, ServerPlayer owner) {
-		RandomSource random = dog.getRandom();
-		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-		for (int attempt = 0; attempt < 30; attempt++) {
-			double angle = random.nextDouble() * Math.PI * 2;
-			double distance = TELEPORT_MIN + random.nextDouble() * (TELEPORT_MAX - TELEPORT_MIN);
-			int x = (int) Math.floor(owner.getX() + Math.cos(angle) * distance);
-			int z = (int) Math.floor(owner.getZ() + Math.sin(angle) * distance);
-			for (int y = owner.getBlockY() + 3; y >= owner.getBlockY() - 5; y--) {
-				pos.set(x, y, z);
-				if (isStandable(level, pos)) {
-					if (dog.randomTeleport(x + 0.5, y, z + 0.5, true)) {
-						dog.getNavigation().stop();
-						return true;
-					}
-					break;
-				}
-			}
-		}
-		return false;
-	}
+    private static void sendStatus(ServerPlayer player) {
+        List<DogsPayload.Entry> list = new ArrayList<>();
+        for (Map.Entry<UUID, DogInfo> entry : STATUS.entrySet()) {
+            UUID id = entry.getKey();
+            DogInfo i = entry.getValue();
+            if (i.owner.equals(player.getUUID())) {
+                Pending p = PENDING.get(id);
+                int itemCount = p != null ? p.items.size() : 0;
+                list.add(new DogsPayload.Entry(i.name, i.state, i.x, i.y, i.z,
+                        i.health, i.maxHealth, i.dim, i.activity, itemCount));
+            }
+        }
+        boolean had = HUD_ACTIVE.contains(player.getUUID());
+        if (list.isEmpty() && !had) {
+            return;
+        }
+        if (list.isEmpty()) {
+            HUD_ACTIVE.remove(player.getUUID());
+        } else {
+            HUD_ACTIVE.add(player.getUUID());
+        }
+        ServerPlayNetworking.send(player, new DogsPayload(list));
+    }
 
-	private static boolean isStandable(ServerLevel level, BlockPos feet) {
-		BlockPos below = feet.below();
-		BlockPos head = feet.above();
-		return !level.getBlockState(below).getCollisionShape(level, below).isEmpty()
-				&& level.getBlockState(feet).getCollisionShape(level, feet).isEmpty()
-				&& level.getBlockState(head).getCollisionShape(level, head).isEmpty()
-				&& level.getFluidState(feet).isEmpty();
-	}
+    private static boolean teleportNearOwner(ServerLevel level, Mob dog, ServerPlayer owner) {
+        RandomSource random = dog.getRandom();
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        for (int attempt = 0; attempt < 30; attempt++) {
+            double angle = random.nextDouble() * Math.PI * 2;
+            double distance = TELEPORT_MIN + random.nextDouble() * (TELEPORT_MAX - TELEPORT_MIN);
+            int x = (int) Math.floor(owner.getX() + Math.cos(angle) * distance);
+            int z = (int) Math.floor(owner.getZ() + Math.sin(angle) * distance);
+            for (int y = owner.getBlockY() + 3; y >= owner.getBlockY() - 5; y--) {
+                pos.set(x, y, z);
+                if (isStandable(level, pos)) {
+                    if (dog.randomTeleport(x + 0.5, y, z + 0.5, true)) {
+                        dog.getNavigation().stop();
+                        return true;
+                    }
+                    break;
+                }
+            }
+        }
+        return false;
+    }
 
-	private static void collectLoot(ServerLevel level, LivingEntity victim, Pending pending) {
-		List<ItemEntity> drops = level.getEntitiesOfClass(ItemEntity.class,
-				victim.getBoundingBox().inflate(3.0),
-				item -> item.isAlive() && item.tickCount < 20);
-				
-		for (ItemEntity drop : drops) {
-			ItemStack stack = drop.getItem();
-			if (stack.is(Items.PORKCHOP) || stack.is(Items.MUTTON) || stack.is(Items.ENDER_PEARL) 
-					|| stack.is(Items.CHICKEN) || stack.is(Items.FEATHER)) {
-				pending.items.add(stack.copy());
-				drop.discard();
-			}
-		}
-		
-		List<ExperienceOrb> xpDrops = level.getEntitiesOfClass(ExperienceOrb.class,
-				victim.getBoundingBox().inflate(3.0),
-				orb -> orb.isAlive());
-		for (ExperienceOrb orb : xpDrops) {
-			pending.xp += orb.getValue();
-			orb.discard();
-		}
-	}
+    private static boolean isStandable(ServerLevel level, BlockPos feet) {
+        BlockPos below = feet.below();
+        BlockPos head = feet.above();
+        return !level.getBlockState(below).getCollisionShape(level, below).isEmpty()
+                && level.getBlockState(feet).getCollisionShape(level, feet).isEmpty()
+                && level.getBlockState(head).getCollisionShape(level, head).isEmpty()
+                && level.getFluidState(feet).isEmpty();
+    }
 
-	private static void dropPending(ServerLevel level, Entity dog, Pending pending, Entity owner) {
-		for (ItemStack stack : pending.items) {
-			ItemEntity drop = new ItemEntity(level, dog.getX(), dog.getY() + 0.5, dog.getZ(), stack);
-			drop.setDefaultPickUpDelay();
-			if (owner != null) {
-				Vec3 push = owner.position().subtract(dog.position()).multiply(1.0, 0.0, 1.0).normalize().scale(0.15);
-				drop.setDeltaMovement(push.x, 0.2, push.z);
-			}
-			level.addFreshEntity(drop);
-		}
-		if (pending.xp > 0) {
-			ExperienceOrb.award(level, dog.position(), pending.xp);
-		}
-	}
+    private static void collectLoot(ServerLevel level, LivingEntity victim, Pending pending) {
+        List<ItemEntity> drops = level.getEntitiesOfClass(ItemEntity.class,
+                victim.getBoundingBox().inflate(3.0),
+                item -> item.isAlive() && item.tickCount < 20);
+
+        for (ItemEntity drop : drops) {
+            ItemStack stack = drop.getItem();
+            if (stack.is(Items.PORKCHOP) || stack.is(Items.MUTTON) || stack.is(Items.ENDER_PEARL)
+                    || stack.is(Items.CHICKEN) || stack.is(Items.FEATHER)) {
+                pending.items.add(stack.copy());
+                drop.discard();
+            }
+        }
+
+        List<ExperienceOrb> xpDrops = level.getEntitiesOfClass(ExperienceOrb.class,
+                victim.getBoundingBox().inflate(3.0),
+                orb -> orb.isAlive());
+        for (ExperienceOrb orb : xpDrops) {
+            pending.xp += orb.getValue();
+            orb.discard();
+        }
+    }
+
+    private static void dropPending(ServerLevel level, Entity dog, Pending pending, Entity owner) {
+        for (ItemStack stack : pending.items) {
+            ItemEntity drop = new ItemEntity(level, dog.getX(), dog.getY() + 0.5, dog.getZ(), stack);
+            drop.setDefaultPickUpDelay();
+            if (owner != null) {
+                Vec3 push = owner.position().subtract(dog.position()).multiply(1.0, 0.0, 1.0).normalize().scale(0.15);
+                drop.setDeltaMovement(push.x, 0.2, push.z);
+            }
+            level.addFreshEntity(drop);
+        }
+        if (pending.xp > 0) {
+            ExperienceOrb.award(level, dog.position(), pending.xp);
+        }
+    }
 }
