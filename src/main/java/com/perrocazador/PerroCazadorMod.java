@@ -144,10 +144,6 @@ public class PerroCazadorMod implements ModInitializer {
 						player.displayClientMessage(Component.literal("Tu perro ya no caza."), true);
 					} else {
 						dog.addTag(HUNTER_TAG);
-						STATUS.entrySet().removeIf(entry ->
-								entry.getValue().owner.equals(player.getUUID())
-										&& entry.getValue().state == DogsPayload.DEAD
-						);
 						STATUS.put(id, new DogInfo(player.getUUID()));
 						sendStatus((ServerPlayer) player);
 						player.displayClientMessage(Component.literal("¡Tu perro ahora es cazador!"), true);
@@ -172,14 +168,12 @@ public class PerroCazadorMod implements ModInitializer {
 		});
 
 		ServerLivingEntityEvents.ALLOW_DAMAGE.register((entity, source, amount) -> {
-			// 1. INMUNIDAD: Si el perro cazador recibe daño de un Enderman, lo ignoramos.
 			if (entity instanceof TamableAnimal dog && dog.getTags().contains(HUNTER_TAG)) {
 				if (source.getEntity() instanceof EnderMan) {
 					return false; 
 				}
 			}
 
-			// 2. El perro cazador no puede dañar a mobs que no estén en su lista de presas
 			Entity attacker = source.getEntity();
 			if (attacker instanceof TamableAnimal dog && dog.getTags().contains(HUNTER_TAG)) {
 				if (entity instanceof LivingEntity livingVictim) {
@@ -210,15 +204,8 @@ public class PerroCazadorMod implements ModInitializer {
 			UUID victimId = victim.getUUID();
 
 			if (victim instanceof TamableAnimal && victim.getTags().contains(HUNTER_TAG)) {
-				DogInfo info = STATUS.get(victimId);
-				if (info != null) {
-					info.state = DogsPayload.DEAD;
-					info.x = victim.getX();
-					info.y = victim.getY();
-					info.z = victim.getZ();
-					info.health = 0;
-					info.activity = "Ha muerto";
-				}
+				// BORRADO INMEDIATO: Lo quitamos del HUD en cuanto muere
+				STATUS.remove(victimId);
 				MISSIONS.remove(victimId);
 			}
 
@@ -280,11 +267,19 @@ public class PerroCazadorMod implements ModInitializer {
 
 	private static void tickPlayerAI(ServerPlayer player) {
 		ServerLevel level = (ServerLevel) player.level();
+		
+		// Limpieza de seguridad: si hay algún perro muerto residual en el HUD, lo borramos
+		STATUS.entrySet().removeIf(entry -> 
+				entry.getValue().owner.equals(player.getUUID()) 
+				&& entry.getValue().state == DogsPayload.DEAD
+		);
+
 		List<Mob> dogs = level.getEntitiesOfClass(Mob.class,
 				player.getBoundingBox().inflate(LEASH_DISTANCE + 64),
 				e -> e instanceof TamableAnimal t
 						&& e.getType() == EntityType.WOLF
 						&& t.isTame()
+						&& t.isAlive() // IMPORTANTE: Solo procesar perros vivos
 						&& t.isOwnedBy(player)
 						&& e.getTags().contains(HUNTER_TAG));
 
