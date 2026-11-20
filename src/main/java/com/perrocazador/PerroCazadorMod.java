@@ -120,7 +120,6 @@ public class PerroCazadorMod implements ModInitializer {
 		PayloadTypeRegistry.playS2C().register(DogsPayload.TYPE, DogsPayload.CODEC);
 		PayloadTypeRegistry.playC2S().register(RecallPayload.TYPE, RecallPayload.CODEC);
 
-		// Receptor del silbido
 		ServerPlayNetworking.registerGlobalReceiver(RecallPayload.TYPE, (payload, context) -> {
 			ServerPlayer player = context.player();
 			ServerLevel level = (ServerLevel) player.level();
@@ -248,7 +247,6 @@ public class PerroCazadorMod implements ModInitializer {
 			Pending pending = PENDING.computeIfAbsent(dog.getUUID(), k -> new Pending());
 			collectLoot(level, victim, pending);
 
-			// Lógica de entrega: Si llega a 16 items o completa la misión, vuelve.
 			if (pending.items.size() >= 16) {
 				pending.delivering = true;
 			}
@@ -342,6 +340,7 @@ public class PerroCazadorMod implements ModInitializer {
 			if (dog.distanceTo(player) < DELIVER_DISTANCE) {
 				tamable.setOrderedToSit(true);
 				RECALLING.remove(id);
+				MISSIONS.remove(id); // <--- ELIMINA LA MISIÓN AL SENTARSE POR SILBIDO
 				if (pending != null) {
 					PENDING.remove(id);
 					dropPending(level, dog, pending, player);
@@ -361,6 +360,7 @@ public class PerroCazadorMod implements ModInitializer {
 		}
 
 		if (tamable.isOrderedToSit()) {
+			MISSIONS.remove(id); // <--- ELIMINA LA MISIÓN SI LO SIENTAS TÚ MANUALMENTE
 			if (pending != null) {
 				PENDING.remove(id);
 				dropPending(level, dog, pending, player);
@@ -511,7 +511,6 @@ public class PerroCazadorMod implements ModInitializer {
 	}
 
 	private static void collectLoot(ServerLevel level, LivingEntity victim, Pending pending) {
-		// Recoger items
 		List<ItemEntity> drops = level.getEntitiesOfClass(ItemEntity.class,
 				victim.getBoundingBox().inflate(3.0),
 				item -> item.isAlive() && item.tickCount < 20);
@@ -520,7 +519,6 @@ public class PerroCazadorMod implements ModInitializer {
 			drop.discard();
 		}
 		
-		// Recoger Orbes de Experiencia (XP)
 		List<ExperienceOrb> xpDrops = level.getEntitiesOfClass(ExperienceOrb.class,
 				victim.getBoundingBox().inflate(3.0),
 				orb -> orb.isAlive());
