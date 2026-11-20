@@ -31,6 +31,7 @@ import net.minecraft.world.entity.TamableAnimal;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.entity.monster.EnderMan;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -49,7 +50,6 @@ public class PerroCazadorMod implements ModInitializer {
 	private static final double TELEPORT_MAX = 12.0;
 
 	private static final double FOLLOW_RANGE = 128.0;
-	private static final int CHECK_INTERVAL = 1;
 	private static final double DELIVER_DISTANCE = 3.0;
 
 	private enum Mission {
@@ -125,7 +125,6 @@ public class PerroCazadorMod implements ModInitializer {
 			}
 			ItemStack held = player.getItemInHand(hand);
 
-			// Si el perro está herido y tienes comida, deja que Minecraft lo cure.
 			if (dog.getHealth() < dog.getMaxHealth() && dog.isFood(held)) {
 				return InteractionResult.PASS; 
 			}
@@ -173,6 +172,14 @@ public class PerroCazadorMod implements ModInitializer {
 		});
 
 		ServerLivingEntityEvents.ALLOW_DAMAGE.register((entity, source, amount) -> {
+			// 1. INMUNIDAD: Si el perro cazador recibe daño de un Enderman, lo ignoramos.
+			if (entity instanceof TamableAnimal dog && dog.getTags().contains(HUNTER_TAG)) {
+				if (source.getEntity() instanceof EnderMan) {
+					return false; 
+				}
+			}
+
+			// 2. El perro cazador no puede dañar a mobs que no estén en su lista de presas
 			Entity attacker = source.getEntity();
 			if (attacker instanceof TamableAnimal dog && dog.getTags().contains(HUNTER_TAG)) {
 				if (entity instanceof LivingEntity livingVictim) {
@@ -186,14 +193,16 @@ public class PerroCazadorMod implements ModInitializer {
 		});
 
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
-			if (server.getTickCount() % CHECK_INTERVAL != 0) {
-				return;
-			}
 			for (ServerPlayer player : server.getPlayerList().getPlayers()) {
 				if (player.isSpectator() || !player.isAlive()) {
 					continue;
 				}
-				tickPlayer(player);
+				
+				tickPlayerAI(player);
+
+				if (server.getTickCount() % 5 == 0) {
+					sendStatus(player);
+				}
 			}
 		});
 
@@ -269,7 +278,7 @@ public class PerroCazadorMod implements ModInitializer {
 		return isHuntTarget(e, mission);
 	}
 
-	private static void tickPlayer(ServerPlayer player) {
+	private static void tickPlayerAI(ServerPlayer player) {
 		ServerLevel level = (ServerLevel) player.level();
 		List<Mob> dogs = level.getEntitiesOfClass(Mob.class,
 				player.getBoundingBox().inflate(LEASH_DISTANCE + 64),
@@ -293,7 +302,6 @@ public class PerroCazadorMod implements ModInitializer {
 				info.activity = "Fuera de la zona cargada";
 			}
 		}
-		sendStatus(player);
 	}
 
 	private static void processDog(ServerLevel level, ServerPlayer player, Mob dog) {
@@ -352,7 +360,6 @@ public class PerroCazadorMod implements ModInitializer {
 
 		if (dog.getHealth() < dog.getMaxHealth() * 0.4f) {
 			setActivity(dog, "Descansando (herido)");
-			// AÑADIDO: Que te siga caminando incluso si está herido
 			if (dist > 10.0 && dog.getNavigation().isDone()) {
 				dog.getNavigation().moveTo(player, 1.2);
 			}
@@ -379,13 +386,11 @@ public class PerroCazadorMod implements ModInitializer {
 			player.displayClientMessage(Component.literal(
 					"No hay " + mission.label + " cerca (" + (int) HUNT_RADIUS
 							+ " bloques). Mision cancelada."), true);
-			// AÑADIDO: Que te siga caminando
 			if (dist > 10.0 && dog.getNavigation().isDone()) {
 				dog.getNavigation().moveTo(player, 1.2);
 			}
 			setActivity(dog, "Siguiendote");
 		} else {
-			// AÑADIDO: Que te siga caminando a partir de 10 bloques
 			if (dist > 10.0 && dog.getNavigation().isDone()) {
 				dog.getNavigation().moveTo(player, 1.2);
 			}
