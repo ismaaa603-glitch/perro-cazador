@@ -43,17 +43,13 @@ public class PerroCazadorMod implements ModInitializer {
 
 	private static final Set<EntityType<?>> PREY = Set.of(EntityType.PIG, EntityType.SHEEP);
 
-	// --- DISTANCIAS AJUSTADAS ---
-	// Radio de búsqueda: 128 bloques (8 chunks)
 	private static final double HUNT_RADIUS = 128.0; 
-	
-	// Distancia de teletransporte: 144 bloques (mayor que el radio de búsqueda para que pueda perseguir presas lejanas)
 	private static final double LEASH_DISTANCE = 144.0; 
 	
 	private static final double TELEPORT_MIN = 8.0;
 	private static final double TELEPORT_MAX = 12.0;
 
-	private static final double FOLLOW_RANGE = 160.0; // Aumentado también para que la IA siga funcionando bien a esa distancia
+	private static final double FOLLOW_RANGE = 160.0; 
 	private static final double DELIVER_DISTANCE = 3.0;
 
 	private enum Mission {
@@ -338,8 +334,25 @@ public class PerroCazadorMod implements ModInitializer {
 
 		Pending pending = PENDING.get(id);
 		Mission mission = MISSIONS.get(id);
+		double dist = dog.distanceTo(player);
 
-		// --- LÓGICA DEL SILBIDO (RECALL) ---
+		// NUEVO: Regla de rescate (si está en una cueva o atascado)
+		boolean isStuck = false;
+		if (dist > 15.0 && dog.getTarget() == null) {
+			// Si no puede encontrar un camino hacia ti (la navegación falla)
+			if (dog.getNavigation().isDone() && !dog.getNavigation().moveTo(player, 1.2)) {
+				isStuck = true;
+			}
+			// Si está muy abajo o muy arriba (en una cueva)
+			if (Math.abs(dog.getY() - player.getY()) > 25.0) {
+				isStuck = true;
+			}
+		}
+
+		if (isStuck) {
+			teleportNearOwner(level, dog, player);
+		}
+
 		if (RECALLING.contains(id)) {
 			if (dog.distanceTo(player) < DELIVER_DISTANCE) {
 				tamable.setOrderedToSit(true);
@@ -378,7 +391,6 @@ public class PerroCazadorMod implements ModInitializer {
 			dog.setTarget(null);
 			teleportNearOwner(level, dog, player);
 		}
-		double dist = dog.distanceTo(player);
 
 		if (pending != null && pending.delivering) {
 			pending.deliverTicks++;
