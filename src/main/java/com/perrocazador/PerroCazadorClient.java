@@ -2,14 +2,13 @@ package com.perrocazador;
 
 import java.util.List;
 
+import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.client.DeltaTracker;
-import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
@@ -19,7 +18,7 @@ import org.lwjgl.glfw.GLFW;
 public class PerroCazadorClient implements ClientModInitializer {
 
 	private static volatile List<DogsPayload.Entry> dogs = List.of();
-	private static KeyMapping recallKey;
+	private static boolean wasPressed = false; // Para que no se envíe el paquete 20 veces por segundo
 
 	@Override
 	public void onInitializeClient() {
@@ -28,22 +27,20 @@ public class PerroCazadorClient implements ClientModInitializer {
 		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> dogs = List.of());
 		HudRenderCallback.EVENT.register(PerroCazadorClient::render);
 
-		// Registrar la tecla 'ñ' (GLFW_KEY_SEMICOLON en teclados US es la misma tecla que 'ñ' en ES)
-		recallKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
-				"key.perro_cazador.recall",
-				GLFW.GLFW_KEY_SEMICOLON,
-				"category.perro_cazador"
-		));
-
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
-			while (recallKey.consumeClick()) {
-				if (client.player != null) {
-					// Solo funciona si tienes un hueso en la mano principal o secundaria
-					if (client.player.getMainHandItem().is(Items.BONE) || client.player.getOffhandItem().is(Items.BONE)) {
-						ClientPlayNetworking.send(new RecallPayload());
-					}
+			if (client.player == null) return;
+
+			// Escuchar la tecla 'ñ' (Semicolon en teclados US, que es la tecla física de la ñ)
+			boolean isPressed = InputConstants.isKeyDown(client.getWindow().getWindow(), GLFW.GLFW_KEY_SEMICOLON);
+
+			// Si se acaba de pulsar y no hay ninguna pantalla abierta (como el chat o el inventario)
+			if (isPressed && !wasPressed && client.screen == null) {
+				// Solo funciona si tienes un hueso en la mano principal o secundaria
+				if (client.player.getMainHandItem().is(Items.BONE) || client.player.getOffhandItem().is(Items.BONE)) {
+					ClientPlayNetworking.send(new RecallPayload());
 				}
 			}
+			wasPressed = isPressed;
 		});
 	}
 
