@@ -54,6 +54,9 @@ public class PerroCazadorMod implements ModInitializer {
 
 	private static final double FOLLOW_RANGE = 160.0; 
 	private static final double DELIVER_DISTANCE = 3.0;
+	
+	// NUEVO: Diferencia máxima de altura para perseguir a una presa
+	private static final double MAX_Y_DIFF = 4.0;
 
 	private enum Mission {
 		ENDERMAN(EntityType.ENDERMAN, Items.ENDER_PEARL, Items.ENDER_PEARL, "endermans"),
@@ -113,7 +116,6 @@ public class PerroCazadorMod implements ModInitializer {
 		}
 	}
 
-	// Estructura para guardar el chunk y el nivel donde se cargó
 	private record TicketData(ServerLevel level, ChunkPos pos) {}
 
 	private static final Map<UUID, Pending> PENDING = new HashMap<>();
@@ -121,8 +123,6 @@ public class PerroCazadorMod implements ModInitializer {
 	private static final Map<UUID, DogInfo> STATUS = new HashMap<>();
 	private static final Set<UUID> HUD_ACTIVE = new HashSet<>();
 	private static final Set<UUID> RECALLING = new HashSet<>();
-	
-	// Mapa para rastrear a los perros que están cargando chunks (Máximo 2)
 	private static final Map<UUID, TicketData> ACTIVE_TICKETS = new HashMap<>();
 
 	@Override
@@ -144,7 +144,7 @@ public class PerroCazadorMod implements ModInitializer {
 					tamable.setOrderedToSit(false);
 				}
 				dog.setTarget(null);
-				removeTicket(dog.getUUID()); // Liberar chunk al llamarlo
+				removeTicket(dog.getUUID());
 			}
 		});
 
@@ -168,7 +168,7 @@ public class PerroCazadorMod implements ModInitializer {
 						MISSIONS.remove(id);
 						STATUS.remove(id);
 						RECALLING.remove(id);
-						removeTicket(id); // Liberar chunk
+						removeTicket(id);
 						Pending carried = PENDING.remove(id);
 						if (carried != null && level instanceof ServerLevel serverLevel) {
 							dropPending(serverLevel, dog, carried, player);
@@ -239,7 +239,7 @@ public class PerroCazadorMod implements ModInitializer {
 				STATUS.remove(victimId);
 				MISSIONS.remove(victimId);
 				RECALLING.remove(victimId);
-				removeTicket(victimId); // Liberar chunk si muere
+				removeTicket(victimId);
 			}
 
 			Pending carried = PENDING.remove(victimId);
@@ -272,7 +272,6 @@ public class PerroCazadorMod implements ModInitializer {
 		});
 
 		ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
-			// Limpiar todos los tickets para no dejar chunks cargados al cerrar
 			for (UUID id : new ArrayList<>(ACTIVE_TICKETS.keySet())) {
 				removeTicket(id);
 			}
@@ -361,6 +360,13 @@ public class PerroCazadorMod implements ModInitializer {
 		Mission mission = MISSIONS.get(id);
 		double dist = dog.distanceTo(player);
 
+		// REGLA ANTICAÍDAS: Si está cayendo, en lava, o a punto de ahogarse, salvarlo.
+		if (dog.fallDistance > 3.0 || dog.isInLava() || (dog.isInWater() && dog.getAirSupply() < 50)) {
+			teleportNearOwner(level, dog, player);
+			setActivity(dog, "Rescatado");
+			return;
+		}
+
 		// --- GESTIÓN DE CARGA DE CHUNKS (MÁX 2 PERROS) ---
 		if (dist > 64.0) {
 			if (!ACTIVE_TICKETS.containsKey(id)) {
@@ -369,7 +375,6 @@ public class PerroCazadorMod implements ModInitializer {
 					ACTIVE_TICKETS.put(id, new TicketData(level, currentChunk));
 					level.getChunkSource().addRegionTicket(TicketType.FORCED, currentChunk, 3, Unit.INSTANCE);
 				} else {
-					// Ya hay 2 perros cargando chunks. Este debe volver para no lagear.
 					if (dog.getTarget() != null) {
 						dog.setTarget(null);
 						dog.setLastHurtByMob(null); 
@@ -381,7 +386,6 @@ public class PerroCazadorMod implements ModInitializer {
 					return;
 				}
 			} else {
-				// Si ya tiene ticket, comprobar si se ha movido de chunk para actualizarlo
 				TicketData data = ACTIVE_TICKETS.get(id);
 				ChunkPos currentChunk = new ChunkPos(dog.blockPosition());
 				if (data.pos().x != currentChunk.x || data.pos().z != currentChunk.z) {
@@ -391,7 +395,6 @@ public class PerroCazadorMod implements ModInitializer {
 				}
 			}
 		} else if (dist < 48.0) {
-			// Si se acerca, liberar el ticket
 			removeTicket(id);
 		}
 
@@ -455,7 +458,11 @@ public class PerroCazadorMod implements ModInitializer {
 		}
 
 		if (dog.getTarget() != null && dog.getTarget().isAlive()) {
-			if (!isHuntTarget(dog.getTarget(), mission)) {
+			// REGLA DE SEGURIDAD VERTICAL: Si la presa está muy arriba o muy abajo, la ignoramos.
+			if (Math.abs(dog.getTarget().getY() - dog.getY()) > MAX_Y_DIFF) {
+				dog.setTarget(null);
+				dog.setLastHurtByMob(null); 
+			} else if (!isHuntTarget(dog.getTarget(), mission)) {
 				dog.setTarget(null);
 				dog.setLastHurtByMob(null); 
 			} else {
@@ -472,6 +479,7 @@ public class PerroCazadorMod implements ModInitializer {
 			return;
 		}
 
+		// BÚSQUEDA DE PRESAS: Añadido el filtro de altura (MAX_Y_DIFF)
 		Mob prey = level.getEntitiesOfClass(Mob.class,
 				player.getBoundingBox().inflate(HUNT_RADIUS),
 				e -> isHuntTarget(e, mission)
@@ -479,7 +487,8 @@ public class PerroCazadorMod implements ModInitializer {
 						&& !e.isBaby()
 						&& !e.hasCustomName()
 						&& e != dog
-						&& e.distanceTo(player) <= HUNT_RADIUS)
+						&& e.distanceTo(player) <= HUNT_RADIUS
+						&& Math.abs(e.getY() - dog.getY()) <= MAX_Y_DIFF) // <--- FILTRO DE ALTURA
 				.stream()
 				.min(Comparator.comparingDouble(e -> e.distanceToSqr(dog)))
 				.orElse(null);
@@ -490,8 +499,7 @@ public class PerroCazadorMod implements ModInitializer {
 		} else if (mission != null) {
 			MISSIONS.remove(id);
 			player.displayClientMessage(Component.literal(
-					"No hay " + mission.label + " cerca (" + (int) HUNT_RADIUS
-							+ " bloques). Mision cancelada."), true);
+					"No hay " + mission.label + " cerca o estan en un sitio inaccesible. Mision cancelada."), true);
 			if (dist > 10.0 && dog.getNavigation().isDone()) {
 				dog.getNavigation().moveTo(player, 1.2);
 			}
