@@ -4,7 +4,7 @@ Tu lobo domado (solo el que elijas) caza animales cerca de ti y te entrega el bo
 
 ## Uso
 - Agachate y haz clic derecho sobre tu lobo domado con un hueso en la mano. Repite para quitarle el modo cazador.
-- Caza cerdos y ovejas adultos sin nombre, hasta ~24 bloques de ti.
+- Caza cerdos y ovejas adultos sin nombre, en todos los chunks cargados.
 - El botin (carne, cuero, plumas...) va directo a tu inventario (si no cabe, cae a tus pies). Recibes 1-3 de XP por presa.
 - Si lo mandas sentarse o baja del 40 % de vida, deja de cazar. Si esta defendiendote, no interfiere.
 

@@ -32,8 +32,9 @@ public class PerroCazadorMod implements ModInitializer {
 	private static final Set<EntityType<?>> PREY = Set.of(
 			EntityType.PIG, EntityType.SHEEP);
 
-	private static final double OWNER_RADIUS = 24.0;
-	private static final double SEARCH_RADIUS = 48.0;
+	private static final double OWNER_RADIUS = 2000.0; // practicamente: todos los chunks cargados
+	private static final double SEARCH_RADIUS = 2000.0;
+	private static final double FOLLOW_RANGE = 128.0; // hasta donde puede trazar ruta el perro
 	private static final int CHECK_INTERVAL = 20; // ticks
 
 	@Override
@@ -102,6 +103,11 @@ public class PerroCazadorMod implements ModInitializer {
 
 		for (Mob dog : dogs) {
 			TamableAnimal tamable = (TamableAnimal) dog;
+			net.minecraft.world.entity.ai.attributes.AttributeInstance range =
+					dog.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE);
+			if (range != null && range.getBaseValue() < FOLLOW_RANGE) {
+				range.setBaseValue(FOLLOW_RANGE);
+			}
 			if (tamable.isOrderedToSit()) {
 				continue;
 			}
