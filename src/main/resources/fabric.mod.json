@@ -1,0 +1,23 @@
+{
+	"schemaVersion": 1,
+	"id": "perro_cazador",
+	"version": "${version}",
+	"name": "Perro Cazador",
+	"description": "Tu lobo domado (el que tú elijas) caza animales y te trae la comida, el cuero y la experiencia.",
+	"authors": [
+		"ismaaa603-glitch"
+	],
+	"license": "CC0-1.0",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"com.perrocazador.PerroCazadorMod"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.20.1",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}
