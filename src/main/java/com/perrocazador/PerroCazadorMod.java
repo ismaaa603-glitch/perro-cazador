@@ -318,11 +318,12 @@ public class PerroCazadorMod implements ModInitializer {
 			return;
 		}
 
-		// Si te alejas tu (o el) mas de 6 chunks, se teletransporta cerca de ti, pero nunca justo encima.
-		if (dog.distanceTo(player) > LEASH_DISTANCE) {
-			dog.setTarget(null);
-			teleportNearOwner(level, dog, player);
-		}
+		// Nunca teletransportar al perro mientras esté atacando a una presa.
+if ((dog.getTarget() == null || !dog.getTarget().isAlive())
+        && dog.distanceTo(player) > LEASH_DISTANCE) {
+    dog.setTarget(null);
+    teleportNearOwner(level, dog, player);
+}
 		double dist = dog.distanceTo(player);
 
 		// Entrega: vuelve andando y suelta el botin al suelo a pocos bloques de ti.
