@@ -125,7 +125,7 @@ public class PerroCazadorMod implements ModInitializer {
 			}
 			ItemStack held = player.getItemInHand(hand);
 
-			// ¡NUEVA LÓGICA DE CURACIÓN! Si el perro está herido y tienes comida, deja que Minecraft lo cure.
+			// Si el perro está herido y tienes comida, deja que Minecraft lo cure.
 			if (dog.getHealth() < dog.getMaxHealth() && dog.isFood(held)) {
 				return InteractionResult.PASS; 
 			}
@@ -352,6 +352,10 @@ public class PerroCazadorMod implements ModInitializer {
 
 		if (dog.getHealth() < dog.getMaxHealth() * 0.4f) {
 			setActivity(dog, "Descansando (herido)");
+			// AÑADIDO: Que te siga caminando incluso si está herido
+			if (dist > 10.0 && dog.getNavigation().isDone()) {
+				dog.getNavigation().moveTo(player, 1.2);
+			}
 			return;
 		}
 
@@ -375,8 +379,16 @@ public class PerroCazadorMod implements ModInitializer {
 			player.displayClientMessage(Component.literal(
 					"No hay " + mission.label + " cerca (" + (int) HUNT_RADIUS
 							+ " bloques). Mision cancelada."), true);
+			// AÑADIDO: Que te siga caminando
+			if (dist > 10.0 && dog.getNavigation().isDone()) {
+				dog.getNavigation().moveTo(player, 1.2);
+			}
 			setActivity(dog, "Siguiendote");
 		} else {
+			// AÑADIDO: Que te siga caminando a partir de 10 bloques
+			if (dist > 10.0 && dog.getNavigation().isDone()) {
+				dog.getNavigation().moveTo(player, 1.2);
+			}
 			setActivity(dog, "Siguiendote");
 		}
 	}
