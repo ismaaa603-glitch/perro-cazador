@@ -41,7 +41,8 @@ public class PerroCazadorMod implements ModInitializer {
 	public static final String MOD_ID = "perro_cazador";
 	public static final String HUNTER_TAG = "perro_cazador";
 
-	private static final Set<EntityType<?>> PREY = Set.of(EntityType.PIG, EntityType.SHEEP);
+	// AÑADIDO: EntityType.CHICKEN a las presas por defecto
+	private static final Set<EntityType<?>> PREY = Set.of(EntityType.PIG, EntityType.SHEEP, EntityType.CHICKEN);
 
 	private static final double HUNT_RADIUS = 128.0; 
 	private static final double LEASH_DISTANCE = 144.0; 
@@ -55,7 +56,8 @@ public class PerroCazadorMod implements ModInitializer {
 	private enum Mission {
 		ENDERMAN(EntityType.ENDERMAN, Items.ENDER_PEARL, Items.ENDER_PEARL, "endermans"),
 		PIG(EntityType.PIG, Items.PORKCHOP, Items.PORKCHOP, "cerdos"),
-		SHEEP(EntityType.SHEEP, Items.MUTTON, Items.MUTTON, "ovejas");
+		SHEEP(EntityType.SHEEP, Items.MUTTON, Items.MUTTON, "ovejas"),
+		CHICKEN(EntityType.CHICKEN, Items.CHICKEN, Items.CHICKEN, "pollos"); // AÑADIDO: Misión de pollos
 
 		final EntityType<?> target;
 		final Item trigger;
@@ -519,9 +521,10 @@ public class PerroCazadorMod implements ModInitializer {
 				
 		for (ItemEntity drop : drops) {
 			ItemStack stack = drop.getItem();
-			// Solo recoge carne de cerdo, carne de oveja o perlas de ender.
-			// Si es otra cosa (como lana), se queda en el suelo.
-			if (stack.is(Items.PORKCHOP) || stack.is(Items.MUTTON) || stack.is(Items.ENDER_PEARL)) {
+			// Solo recoge carne de cerdo, carne de oveja, perlas de ender, POLLO CRUDO y PLUMAS.
+			// Si es otra cosa (como lana o huesos), se queda en el suelo.
+			if (stack.is(Items.PORKCHOP) || stack.is(Items.MUTTON) || stack.is(Items.ENDER_PEARL) 
+					|| stack.is(Items.CHICKEN) || stack.is(Items.FEATHER)) {
 				pending.items.add(stack.copy());
 				drop.discard();
 			}
