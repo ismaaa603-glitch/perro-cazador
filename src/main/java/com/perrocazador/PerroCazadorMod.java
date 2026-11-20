@@ -40,15 +40,15 @@ import net.minecraft.world.phys.Vec3;
  * Perro Cazador: los lobos domados que marques (agachado + clic derecho con un hueso) cazan
  * cerdos y ovejas y te traen el botin presa por presa, andando, y te lo sueltan al suelo.
  * Misiones: clic derecho al perro con ojo de ender (endermans), carne de cerdo cruda (cerdos)
- * o carne de oveja cruda (ovejas). Cuando consigue el objeto, vuelve a entregarlo.
- * Mientras hay mision activa tambien sigue cazando cerdos/ovejas de forma normal.
+ * o carne de oveja cruda (ovejas). 
+ * Si hay mision activa, SOLO caza el objetivo de esa mision.
  * Solo se teletransporta si se aleja 88+ bloques del dueno (el TP vanilla del lobo se ignora).
  */
 public class PerroCazadorMod implements ModInitializer {
 	public static final String MOD_ID = "perro_cazador";
 	public static final String HUNTER_TAG = "perro_cazador";
 
-	/** Presas del modo normal (siempre activas). */
+	/** Presas del modo normal (siempre activas si no hay mision). */
 	private static final Set<EntityType<?>> PREY = Set.of(EntityType.PIG, EntityType.SHEEP);
 
 	// ---- Distancias (ajustadas a 6 chunks de simulacion/renderizado) ----
@@ -177,8 +177,8 @@ public class PerroCazadorMod implements ModInitializer {
 						MISSIONS.put(dog.getUUID(), mission);
 						dog.setTarget(null);
 						player.displayClientMessage(Component.literal(
-								"Tu perro ira a por " + mission.label
-										+ " (y tambien cerdos/ovejas) y te traera lo que suelten."), true);
+								"Tu perro ira exclusivamente a por " + mission.label
+										+ " y te traera lo que suelten."), true);
 					}
 					return InteractionResult.SUCCESS;
 				}
@@ -241,7 +241,7 @@ public class PerroCazadorMod implements ModInitializer {
 				MISSIONS.remove(dog.getUUID());
 				pending.delivering = true;
 			}
-			// Si es una mision y aun no tiene el objetivo, sigue cazando (cerdos/ovejas incluidos).
+			// Si es una mision y aun no tiene el objetivo, sigue cazando exclusivamente eso.
 		});
 
 		ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
@@ -261,12 +261,16 @@ public class PerroCazadorMod implements ModInitializer {
 		});
 	}
 
-	/** ¿Es este mob una presa valida? Siempre cerdos/ovejas; ademas el objetivo de la mision. */
+	/** 
+	 * Define que mobs son cazables. 
+	 * Si hay mision activa: SOLO el objetivo de la mision.
+	 * Si NO hay mision: SOLO cerdos y ovejas (PREY).
+	 */
 	private static boolean isHuntTarget(LivingEntity e, Mission mission) {
-		if (PREY.contains(e.getType())) {
-			return true;
+		if (mission != null) {
+			return e.getType() == mission.target;
 		}
-		return mission != null && e.getType() == mission.target;
+		return PREY.contains(e.getType());
 	}
 
 	/**
@@ -333,7 +337,6 @@ public class PerroCazadorMod implements ModInitializer {
 		}
 
 		// Solo se teletransporta si se aleja 88+ bloques y no esta peleando.
-		// (El TP vanilla del lobo lo bloquea TamableAnimalMixin.)
 		if ((dog.getTarget() == null || !dog.getTarget().isAlive())
 				&& dog.distanceTo(player) > LEASH_DISTANCE) {
 			dog.setTarget(null);
@@ -367,7 +370,7 @@ public class PerroCazadorMod implements ModInitializer {
 			return;
 		}
 
-		// Presas: SIEMPRE cerdos y ovejas, MAS el objetivo de la mision si hay una activa.
+		// Presas: Si hay mision, SOLO el objetivo. Si no, cerdos y ovejas.
 		// Se ignoran mobs con los que ya estamos peleando o que atacan al dueno/perro.
 		Mob prey = level.getEntitiesOfClass(Mob.class,
 				player.getBoundingBox().inflate(HUNT_RADIUS),
@@ -388,7 +391,7 @@ public class PerroCazadorMod implements ModInitializer {
 		} else if (mission != null) {
 			MISSIONS.remove(id);
 			player.displayClientMessage(Component.literal(
-					"No hay presas ni " + mission.label + " cerca (" + (int) HUNT_RADIUS
+					"No hay " + mission.label + " cerca (" + (int) HUNT_RADIUS
 							+ " bloques). Mision cancelada."), true);
 			report(dog, player, "Siguiendote");
 		} else {
