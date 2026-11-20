@@ -1,9 +1,9 @@
 {
 	"schemaVersion": 1,
 	"id": "perro_cazador",
-	"version": "${version}",
+	"version": "1.1.0",
 	"name": "Perro Cazador",
-	"description": "Tu lobo domado (el que tú elijas) caza animales y te trae la comida, el cuero y la experiencia.",
+	"description": "Tu lobo domado (el que tú elijas) caza animales y te trae el botín, con una UI que muestra si está vivo y a cuántos metros.",
 	"authors": [
 		"ismaaa603-glitch"
 	],
@@ -12,6 +12,9 @@
 	"entrypoints": {
 		"main": [
 			"com.perrocazador.PerroCazadorMod"
+		],
+		"client": [
+			"com.perrocazador.PerroCazadorClient"
 		]
 	},
 	"depends": {
