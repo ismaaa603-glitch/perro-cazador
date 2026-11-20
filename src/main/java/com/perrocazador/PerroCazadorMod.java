@@ -124,6 +124,12 @@ public class PerroCazadorMod implements ModInitializer {
 		});
 
 		ServerLivingEntityEvents.AFTER_DEATH.register((victim, source) -> {
+			// Aviso al dueno si muere su perro cazador.
+			if (victim instanceof TamableAnimal deadDog && deadDog.getTags().contains(HUNTER_TAG)
+					&& deadDog.getOwner() instanceof ServerPlayer deadOwner) {
+				deadOwner.displayClientMessage(Component.literal("Tu perro cazador ha muerto."), false);
+			}
+
 			// Si muere un perro que llevaba botin, lo suelta donde muere.
 			Pending carried = PENDING.remove(victim.getUUID());
 			if (carried != null && victim.level() instanceof ServerLevel deathLevel) {
@@ -171,8 +177,16 @@ public class PerroCazadorMod implements ModInitializer {
 						&& t.isOwnedBy(player)
 						&& e.getTags().contains(HUNTER_TAG));
 
+		List<String> status = new ArrayList<>();
 		for (Mob dog : dogs) {
 			TamableAnimal tamable = (TamableAnimal) dog;
+			if (!tamable.isOrderedToSit()) {
+				Pending carriedNow = PENDING.get(dog.getUUID());
+				int carriedItems = carriedNow == null ? 0 : carriedNow.itemCount();
+				status.add("Perro vivo | " + Math.round(dog.distanceTo(player)) + " m | vida "
+						+ Math.round(dog.getHealth()) + "/" + Math.round(dog.getMaxHealth())
+						+ " | carga " + carriedItems + "/" + DELIVER_ITEMS);
+			}
 			net.minecraft.world.entity.ai.attributes.AttributeInstance range =
 					dog.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE);
 			if (range != null && range.getBaseValue() < FOLLOW_RANGE) {
@@ -242,6 +256,9 @@ public class PerroCazadorMod implements ModInitializer {
 			} else {
 				followOnFoot(dog, player);
 			}
+		}
+		if (!status.isEmpty()) {
+			player.displayClientMessage(Component.literal(String.join("   ||   ", status)), true);
 		}
 	}
 
