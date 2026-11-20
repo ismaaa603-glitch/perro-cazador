@@ -41,12 +41,14 @@ import net.minecraft.world.phys.Vec3;
  * cerdos y ovejas y te traen el botin presa por presa, andando, y te lo sueltan al suelo.
  * Misiones: clic derecho al perro con ojo de ender (endermans), carne de cerdo cruda (cerdos)
  * o carne de oveja cruda (ovejas). Cuando consigue el objeto, vuelve a entregarlo.
+ * Mientras hay mision activa tambien sigue cazando cerdos/ovejas de forma normal.
+ * Solo se teletransporta si se aleja 88+ bloques del dueno (el TP vanilla del lobo se ignora).
  */
 public class PerroCazadorMod implements ModInitializer {
 	public static final String MOD_ID = "perro_cazador";
 	public static final String HUNTER_TAG = "perro_cazador";
 
-	/** Presas del modo normal. */
+	/** Presas del modo normal (siempre activas). */
 	private static final Set<EntityType<?>> PREY = Set.of(EntityType.PIG, EntityType.SHEEP);
 
 	// ---- Distancias (ajustadas a 6 chunks de simulacion/renderizado) ----
@@ -54,7 +56,7 @@ public class PerroCazadorMod implements ModInitializer {
 	/** Solo caza presas que esten a este radio del dueno. */
 	private static final double HUNT_RADIUS = RENDER_CHUNKS * 16 - 16; // 80 bloques
 	/** Si el perro se aleja mas de esto del dueno, se teletransporta cerca (nunca encima). */
-	private static final double LEASH_DISTANCE = RENDER_CHUNKS * 16 - 8; // 88 bloques
+	private static final double LEASH_DISTANCE = 88.0;
 	private static final double TELEPORT_MIN = 8.0;
 	private static final double TELEPORT_MAX = 12.0;
 
@@ -69,8 +71,8 @@ public class PerroCazadorMod implements ModInitializer {
 		SHEEP(EntityType.SHEEP, Items.MUTTON, Items.MUTTON, "ovejas");
 
 		final EntityType<?> target;
-		final Item trigger; // objeto con el que se da la orden
-		final Item goal; // objeto que tiene que conseguir para volver
+		final Item trigger;
+		final Item goal;
 		final String label;
 
 		Mission(EntityType<?> target, Item trigger, Item goal, String label) {
@@ -93,7 +95,7 @@ public class PerroCazadorMod implements ModInitializer {
 	private static final class Pending {
 		final List<ItemStack> items = new ArrayList<>();
 		int xp;
-		boolean delivering; // ya va de camino a entregarlo
+		boolean delivering;
 
 		boolean has(Item item) {
 			for (ItemStack stack : items) {
@@ -105,7 +107,6 @@ public class PerroCazadorMod implements ModInitializer {
 		}
 	}
 
-	/** Estado que se ensena en la UI. */
 	private static final class DogInfo {
 		final UUID owner;
 		byte state = DogsPayload.ALIVE;
@@ -120,10 +121,10 @@ public class PerroCazadorMod implements ModInitializer {
 		}
 	}
 
-	private static final Map<UUID, Pending> PENDING = new HashMap<>(); // botin que lleva cada perro
-	private static final Map<UUID, Mission> MISSIONS = new HashMap<>(); // mision activa de cada perro
-	private static final Map<UUID, DogInfo> STATUS = new HashMap<>(); // para la UI
-	private static final Set<UUID> HUD_ACTIVE = new HashSet<>(); // jugadores a los que ya se les envia la UI
+	private static final Map<UUID, Pending> PENDING = new HashMap<>();
+	private static final Map<UUID, Mission> MISSIONS = new HashMap<>();
+	private static final Map<UUID, DogInfo> STATUS = new HashMap<>();
+	private static final Set<UUID> HUD_ACTIVE = new HashSet<>();
 
 	@Override
 	public void onInitialize() {
@@ -151,24 +152,19 @@ public class PerroCazadorMod implements ModInitializer {
 						}
 						player.displayClientMessage(Component.literal("Tu perro ya no caza."), true);
 					} else {
-    dog.addTag(HUNTER_TAG);
+						dog.addTag(HUNTER_TAG);
 
-    // Eliminar perros muertos del HUD.
-    STATUS.entrySet().removeIf(entry ->
-            entry.getValue().owner.equals(player.getUUID())
-            && entry.getValue().state == DogsPayload.DEAD
-    );
+						STATUS.entrySet().removeIf(entry ->
+								entry.getValue().owner.equals(player.getUUID())
+										&& entry.getValue().state == DogsPayload.DEAD
+						);
 
-    // Registrar el nuevo perro.
-    STATUS.put(id, new DogInfo(player.getUUID()));
+						STATUS.put(id, new DogInfo(player.getUUID()));
+						sendStatus((ServerPlayer) player);
 
-    // Actualizar el HUD inmediatamente.
-    sendStatus((ServerPlayer) player);
-
-    player.displayClientMessage(
-            Component.literal("¡Tu perro ahora es cazador!"), true
-    );
-}
+						player.displayClientMessage(
+								Component.literal("¡Tu perro ahora es cazador!"), true);
+					}
 				}
 				return InteractionResult.SUCCESS;
 			}
@@ -181,7 +177,8 @@ public class PerroCazadorMod implements ModInitializer {
 						MISSIONS.put(dog.getUUID(), mission);
 						dog.setTarget(null);
 						player.displayClientMessage(Component.literal(
-								"Tu perro ira a por " + mission.label + " y te traera lo que suelten."), true);
+								"Tu perro ira a por " + mission.label
+										+ " (y tambien cerdos/ovejas) y te traera lo que suelten."), true);
 					}
 					return InteractionResult.SUCCESS;
 				}
@@ -204,7 +201,6 @@ public class PerroCazadorMod implements ModInitializer {
 		ServerLivingEntityEvents.AFTER_DEATH.register((victim, source) -> {
 			UUID victimId = victim.getUUID();
 
-			// Si muere un perro cazador: queda marcado como muerto en la UI.
 			if (victim instanceof TamableAnimal && victim.getTags().contains(HUNTER_TAG)) {
 				DogInfo info = STATUS.get(victimId);
 				if (info != null) {
@@ -218,7 +214,6 @@ public class PerroCazadorMod implements ModInitializer {
 				MISSIONS.remove(victimId);
 			}
 
-			// Si muere un perro que llevaba botin, lo suelta donde muere.
 			Pending carried = PENDING.remove(victimId);
 			if (carried != null && victim.level() instanceof ServerLevel deathLevel) {
 				dropPending(deathLevel, victim, carried, null);
@@ -229,8 +224,7 @@ public class PerroCazadorMod implements ModInitializer {
 				return;
 			}
 			Mission mission = MISSIONS.get(dog.getUUID());
-			boolean wanted = mission != null ? victim.getType() == mission.target
-					: PREY.contains(victim.getType());
+			boolean wanted = isHuntTarget(victim, mission);
 			if (!wanted || !(victim.level() instanceof ServerLevel level)) {
 				return;
 			}
@@ -240,17 +234,16 @@ public class PerroCazadorMod implements ModInitializer {
 			pending.xp += 1 + dog.getRandom().nextInt(3);
 
 			if (mission == null) {
-				// Modo normal: presa por presa, en cuanto mata una vuelve a entregarla.
+				// Modo normal: presa por presa, vuelve a entregarla.
 				pending.delivering = true;
 			} else if (pending.has(mission.goal)) {
 				// Mision cumplida: ya tiene lo que le pediste, vuelve.
 				MISSIONS.remove(dog.getUUID());
 				pending.delivering = true;
 			}
-			// Si es una mision y aun no ha soltado lo que busca (p. ej. perla), sigue cazando.
+			// Si es una mision y aun no tiene el objetivo, sigue cazando (cerdos/ovejas incluidos).
 		});
 
-		// Al cerrar el mundo, que nadie pierda el botin que llevaba el perro.
 		ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
 			for (Map.Entry<UUID, Pending> entry : new ArrayList<>(PENDING.entrySet())) {
 				for (ServerLevel level : server.getAllLevels()) {
@@ -266,6 +259,28 @@ public class PerroCazadorMod implements ModInitializer {
 			STATUS.clear();
 			HUD_ACTIVE.clear();
 		});
+	}
+
+	/** ¿Es este mob una presa valida? Siempre cerdos/ovejas; ademas el objetivo de la mision. */
+	private static boolean isHuntTarget(LivingEntity e, Mission mission) {
+		if (PREY.contains(e.getType())) {
+			return true;
+		}
+		return mission != null && e.getType() == mission.target;
+	}
+
+	/**
+	 * Ignorar mobs con los que ya estamos peleando o que estan atacando al dueno o al perro:
+	 * esos los gestiona la IA vanilla de defensa del lobo, no la caza.
+	 */
+	private static boolean isEngagedWithUs(Mob e, Mob dog, ServerPlayer player) {
+		if (dog.getTarget() == e) {
+			return true;
+		}
+		if (e.getTarget() == player || e.getTarget() == dog) {
+			return true;
+		}
+		return false;
 	}
 
 	private static void tickPlayer(ServerPlayer player) {
@@ -284,7 +299,6 @@ public class PerroCazadorMod implements ModInitializer {
 			processDog(level, player, dog);
 		}
 
-		// Los perros de este jugador que no estan cargados: "sin senal" (los muertos se quedan como muertos).
 		for (Map.Entry<UUID, DogInfo> entry : STATUS.entrySet()) {
 			DogInfo info = entry.getValue();
 			if (info.owner.equals(player.getUUID()) && info.state != DogsPayload.DEAD
@@ -318,12 +332,13 @@ public class PerroCazadorMod implements ModInitializer {
 			return;
 		}
 
-		// Nunca teletransportar al perro mientras esté atacando a una presa.
-if ((dog.getTarget() == null || !dog.getTarget().isAlive())
-        && dog.distanceTo(player) > LEASH_DISTANCE) {
-    dog.setTarget(null);
-    teleportNearOwner(level, dog, player);
-}
+		// Solo se teletransporta si se aleja 88+ bloques y no esta peleando.
+		// (El TP vanilla del lobo lo bloquea TamableAnimalMixin.)
+		if ((dog.getTarget() == null || !dog.getTarget().isAlive())
+				&& dog.distanceTo(player) > LEASH_DISTANCE) {
+			dog.setTarget(null);
+			teleportNearOwner(level, dog, player);
+		}
 		double dist = dog.distanceTo(player);
 
 		// Entrega: vuelve andando y suelta el botin al suelo a pocos bloques de ti.
@@ -342,41 +357,45 @@ if ((dog.getTarget() == null || !dog.getTarget().isAlive())
 
 		// Si esta peleando (por ejemplo defendiendote), no interferir.
 		if (dog.getTarget() != null && dog.getTarget().isAlive()) {
-			report(dog, player, mission != null ? "Mision: " + mission.label : "Cazando");
+			report(dog, player, mission != null ? "Cazando (mision: " + mission.label + ")" : "Cazando");
 			return;
 		}
+
 		// Si esta herido, que descanse y te siga.
 		if (dog.getHealth() < dog.getMaxHealth() * 0.4f) {
 			report(dog, player, "Descansando (herido)");
 			return;
 		}
 
+		// Presas: SIEMPRE cerdos y ovejas, MAS el objetivo de la mision si hay una activa.
+		// Se ignoran mobs con los que ya estamos peleando o que atacan al dueno/perro.
 		Mob prey = level.getEntitiesOfClass(Mob.class,
 				player.getBoundingBox().inflate(HUNT_RADIUS),
-				e -> (mission != null ? e.getType() == mission.target : PREY.contains(e.getType()))
+				e -> isHuntTarget(e, mission)
 						&& e.isAlive()
 						&& !e.isBaby()
 						&& !e.hasCustomName()
 						&& e != dog
-						&& e.distanceTo(player) <= HUNT_RADIUS)
+						&& e.distanceTo(player) <= HUNT_RADIUS
+						&& !isEngagedWithUs(e, dog, player))
 				.stream()
 				.min(Comparator.comparingDouble(e -> e.distanceToSqr(dog)))
 				.orElse(null);
 
 		if (prey != null) {
 			dog.setTarget(prey);
-			report(dog, player, mission != null ? "Mision: " + mission.label : "Cazando");
+			report(dog, player, mission != null ? "Cazando (mision: " + mission.label + ")" : "Cazando");
 		} else if (mission != null) {
 			MISSIONS.remove(id);
 			player.displayClientMessage(Component.literal(
-					"No hay " + mission.label + " cerca (" + (int) HUNT_RADIUS + " bloques). Mision cancelada."), true);
+					"No hay presas ni " + mission.label + " cerca (" + (int) HUNT_RADIUS
+							+ " bloques). Mision cancelada."), true);
 			report(dog, player, "Siguiendote");
 		} else {
 			report(dog, player, "Siguiendote");
 		}
 	}
 
-	/** Actualiza lo que ve el jugador en la UI. */
 	private static void report(Mob dog, ServerPlayer player, String activity) {
 		DogInfo info = STATUS.computeIfAbsent(dog.getUUID(), k -> new DogInfo(player.getUUID()));
 		info.state = DogsPayload.ALIVE;
@@ -410,7 +429,6 @@ if ((dog.getTarget() == null || !dog.getTarget().isAlive())
 		ServerPlayNetworking.send(player, new DogsPayload(list));
 	}
 
-	/** Teletransporta al perro a 8-12 bloques del dueno, en suelo firme. Nunca encima de el. */
 	private static boolean teleportNearOwner(ServerLevel level, Mob dog, ServerPlayer owner) {
 		RandomSource random = dog.getRandom();
 		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
@@ -442,7 +460,6 @@ if ((dog.getTarget() == null || !dog.getTarget().isAlive())
 				&& level.getFluidState(feet).isEmpty();
 	}
 
-	/** El perro "recoge" los drops de la presa: se quitan del suelo y se guardan para entregarlos. */
 	private static void collectLoot(ServerLevel level, LivingEntity victim, Pending pending) {
 		List<ItemEntity> drops = level.getEntitiesOfClass(ItemEntity.class,
 				victim.getBoundingBox().inflate(3.0),
@@ -453,7 +470,6 @@ if ((dog.getTarget() == null || !dog.getTarget().isAlive())
 		}
 	}
 
-	/** Suelta el botin (y la XP como orbes) en el suelo, en la posicion del perro, empujando los items hacia el dueno. */
 	private static void dropPending(ServerLevel level, Entity dog, Pending pending, Entity owner) {
 		for (ItemStack stack : pending.items) {
 			ItemEntity drop = new ItemEntity(level, dog.getX(), dog.getY() + 0.5, dog.getZ(), stack);
