@@ -114,6 +114,10 @@ public class PerroCazadorMod implements ModInitializer {
 	private static final Map<UUID, DogInfo> STATUS = new HashMap<>();
 	private static final Set<UUID> HUD_ACTIVE = new HashSet<>();
 	private static final Set<UUID> RECALLING = new HashSet<>();
+	
+	// Variables para detectar si el perro está atascado
+	private static final Map<UUID, Vec3> STUCK_POS = new HashMap<>();
+	private static final Map<UUID, Integer> STUCK_TICKS = new HashMap<>();
 
 	@Override
 	public void onInitialize() {
@@ -134,6 +138,8 @@ public class PerroCazadorMod implements ModInitializer {
 					tamable.setOrderedToSit(false);
 				}
 				dog.setTarget(null);
+				// Reseteamos su estado de atascado al llamarlo
+				STUCK_TICKS.put(dog.getUUID(), 0); 
 			}
 		});
 
@@ -157,6 +163,8 @@ public class PerroCazadorMod implements ModInitializer {
 						MISSIONS.remove(id);
 						STATUS.remove(id);
 						RECALLING.remove(id);
+						STUCK_TICKS.remove(id);
+						STUCK_POS.remove(id);
 						Pending carried = PENDING.remove(id);
 						if (carried != null && level instanceof ServerLevel serverLevel) {
 							dropPending(serverLevel, dog, carried, player);
@@ -227,6 +235,8 @@ public class PerroCazadorMod implements ModInitializer {
 				STATUS.remove(victimId);
 				MISSIONS.remove(victimId);
 				RECALLING.remove(victimId);
+				STUCK_TICKS.remove(victimId);
+				STUCK_POS.remove(victimId);
 			}
 
 			Pending carried = PENDING.remove(victimId);
@@ -273,6 +283,8 @@ public class PerroCazadorMod implements ModInitializer {
 			STATUS.clear();
 			HUD_ACTIVE.clear();
 			RECALLING.clear();
+			STUCK_TICKS.clear();
+			STUCK_POS.clear();
 		});
 	}
 
@@ -336,35 +348,35 @@ public class PerroCazadorMod implements ModInitializer {
 		Mission mission = MISSIONS.get(id);
 		double dist = dog.distanceTo(player);
 
-		// Regla de rescate (si está en una cueva o atascado)
-		boolean isStuck = false;
-		if (dist > 15.0 && dog.getTarget() == null) {
-			if (dog.getNavigation().isDone() && !dog.getNavigation().moveTo(player, 1.2)) {
-				isStuck = true;
-			}
-			if (Math.abs(dog.getY() - player.getY()) > 25.0) {
-				isStuck = true;
-			}
+		// --- SISTEMA ANTIATASCOS ---
+		Vec3 lastPos = STUCK_POS.getOrDefault(id, dog.position());
+		if (dog.position().distanceToSqr(lastPos) > 0.5) {
+			// Se ha movido, reseteamos el contador
+			STUCK_POS.put(id, dog.position());
+			STUCK_TICKS.put(id, 0);
+		} else {
+			// No se ha movido, sumamos un tick
+			STUCK_TICKS.put(id, STUCK_TICKS.getOrDefault(id, 0) + 1);
 		}
-
-		if (isStuck) {
-			teleportNearOwner(level, dog, player);
-		}
+		// Si lleva 40 ticks (2 segundos) sin moverse y está lejos de ti
+		boolean isStuck = STUCK_TICKS.getOrDefault(id, 0) > 40;
 
 		if (RECALLING.contains(id)) {
 			if (dog.distanceTo(player) < DELIVER_DISTANCE) {
 				tamable.setOrderedToSit(true);
 				RECALLING.remove(id);
-				MISSIONS.remove(id); // Al llamarlo con la 'ñ' pierde la misión actual
+				MISSIONS.remove(id);
 				if (pending != null) {
 					PENDING.remove(id);
 					dropPending(level, dog, pending, player);
 				}
 				setActivity(dog, "Sentado (Llamado)");
 			} else {
-				if ((dog.getTarget() == null || !dog.getTarget().isAlive()) && dog.distanceTo(player) > LEASH_DISTANCE) {
+				// Si se aleja mucho o SI ESTÁ ATASCADO, lo teletransportamos
+				if (dist > LEASH_DISTANCE || isStuck) {
 					dog.setTarget(null);
 					teleportNearOwner(level, dog, player);
+					STUCK_TICKS.put(id, 0); // Resetear tras teletransportar
 				} else {
 					dog.setTarget(null);
 					if (dog.getNavigation().isDone()) dog.getNavigation().moveTo(player, 1.2);
@@ -374,13 +386,11 @@ public class PerroCazadorMod implements ModInitializer {
 			return;
 		}
 
-		// AQUÍ ESTÁ EL CAMBIO: Ya no borra la misión si está sentado.
 		if (tamable.isOrderedToSit()) {
 			if (pending != null) {
 				PENDING.remove(id);
 				dropPending(level, dog, pending, player);
 			}
-			// Si tiene una misión guardada, se la mostramos en el HUD.
 			if (mission != null) {
 				setActivity(dog, "Sentado (Mision: " + mission.label + ")");
 			} else {
@@ -389,18 +399,21 @@ public class PerroCazadorMod implements ModInitializer {
 			return;
 		}
 
-		if ((dog.getTarget() == null || !dog.getTarget().isAlive())
-				&& dog.distanceTo(player) > LEASH_DISTANCE) {
-			dog.setTarget(null);
-			teleportNearOwner(level, dog, player);
+		if ((dog.getTarget() == null || !dog.getTarget().isAlive())) {
+			// Si se aleja mucho, o SI ESTÁ ATASCADO siguiéndote
+			if (dist > LEASH_DISTANCE || (isStuck && dist > 15.0 && dog.getTarget() == null)) {
+				teleportNearOwner(level, dog, player);
+				STUCK_TICKS.put(id, 0);
+			}
 		}
 
 		if (pending != null && pending.delivering) {
 			pending.deliverTicks++;
-			if (dist < DELIVER_DISTANCE || pending.deliverTicks > 600) {
+			if (dist < DELIVER_DISTANCE || pending.deliverTicks > 600 || isStuck) {
 				PENDING.remove(id);
 				dropPending(level, dog, pending, player);
 				setActivity(dog, "Botin entregado");
+				STUCK_TICKS.put(id, 0);
 			} else {
 				dog.setTarget(null);
 				dog.getNavigation().moveTo(player, 1.3);
