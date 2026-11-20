@@ -13,16 +13,9 @@ import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
-import net.minecraft.core.HolderLookup;
-import net.minecraft.nbt.CompoundTag;
-import net.minecraft.nbt.ListTag;
-import net.minecraft.nbt.NbtOps;
-import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.Component;
-import net.minecraft.resources.RegistryOps;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.util.ProblemReporter;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
@@ -36,8 +29,6 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.level.storage.TagValueInput;
-import net.minecraft.world.level.storage.TagValueOutput;
 import net.minecraft.world.phys.Vec3;
 
 public class PerroCazadorMod implements ModInitializer {
@@ -53,9 +44,10 @@ public class PerroCazadorMod implements ModInitializer {
 	private static final double SEARCH_RADIUS = 64.0;
 	private static final double MAX_WANDER_DIST = 96.0;
 	private static final int MAX_CAPACITY = 16;
-	private static final int CHECK_INTERVAL = 20;
+	private static final int CHECK_INTERVAL = 10;
 	private static final double DELIVER_DISTANCE = 3.0;
 
+	// Botín que lleva cada perro. Solo en memoria: al parar el servidor se suelta.
 	private static final Map<UUID, Pending> PENDING = new HashMap<>();
 
 	private static final class Pending {
@@ -70,39 +62,6 @@ public class PerroCazadorMod implements ModInitializer {
 			}
 			return total;
 		}
-
-		public void saveToNbt(CompoundTag tag, HolderLookup.Provider registries) {
-			RegistryOps<Tag> ops = registries.createSerializationContext(NbtOps.INSTANCE);
-
-			CompoundTag data = new CompoundTag();
-			data.putInt("XP", xp);
-			data.putBoolean("Returning", returningToOwner);
-
-			ListTag list = new ListTag();
-			for (ItemStack stack : items) {
-				ItemStack.CODEC.encodeStart(ops, stack).result().ifPresent(list::add);
-			}
-			data.put("Items", list);
-			tag.put("PerroCazadorData", data);
-		}
-
-		public static Pending loadFromNbt(CompoundTag tag, HolderLookup.Provider registries) {
-			if (!tag.contains("PerroCazadorData")) return null;
-			RegistryOps<Tag> ops = registries.createSerializationContext(NbtOps.INSTANCE);
-
-			CompoundTag data = tag.getCompoundOrEmpty("PerroCazadorData");
-			Pending pending = new Pending();
-			pending.xp = data.getIntOr("XP", 0);
-			pending.returningToOwner = data.getBooleanOr("Returning", false);
-
-			ListTag list = data.getListOrEmpty("Items");
-			for (int i = 0; i < list.size(); i++) {
-				list.getCompound(i)
-						.flatMap(t -> ItemStack.CODEC.parse(ops, t).result())
-						.ifPresent(pending.items::add);
-			}
-			return pending;
-		}
 	}
 
 	@Override
@@ -115,14 +74,11 @@ public class PerroCazadorMod implements ModInitializer {
 			boolean hasBone = player.getItemInHand(hand).is(Items.BONE);
 
 			if (!level.isClientSide()) {
-				syncFromEntity(dog, level.registryAccess());
-
 				if (player.isShiftKeyDown() && hasBone) {
 					if (dog.getTags().contains(HUNTER_TAG)) {
 						dog.removeTag(HUNTER_TAG);
 						dog.setTarget(null);
 						Pending carried = PENDING.remove(dog.getUUID());
-						clearEntityNbt(dog, level.registryAccess());
 						if (carried != null && dog.level() instanceof ServerLevel sl) {
 							dropPending(sl, dog, carried, player);
 						}
@@ -138,12 +94,23 @@ public class PerroCazadorMod implements ModInitializer {
 
 				if (hasBone && PENDING.containsKey(dog.getUUID())) {
 					Pending carried = PENDING.remove(dog.getUUID());
-					clearEntityNbt(dog, level.registryAccess());
 					if (carried != null && dog.level() instanceof ServerLevel sl) {
 						dropPending(sl, dog, carried, player);
 						player.displayClientMessage(Component.literal("Tu perro te ha soltado el botín."), true);
 					}
 					return InteractionResult.SUCCESS;
+				}
+
+				// Clic normal: mostrar el estado del perro (no bloquea sentar/levantar).
+				if (dog.getTags().contains(HUNTER_TAG)) {
+					Pending p = PENDING.get(dog.getUUID());
+					int items = p == null ? 0 : p.itemCount();
+					int xp = p == null ? 0 : p.xp;
+					player.displayClientMessage(Component.literal(
+							"Perro cazador | Carga: " + items + "/" + MAX_CAPACITY + " | XP: " + xp), true);
+				} else {
+					player.displayClientMessage(Component.literal(
+							"Perro normal. Shift + clic con hueso para hacerlo cazador."), true);
 				}
 			}
 
@@ -174,7 +141,6 @@ public class PerroCazadorMod implements ModInitializer {
 				return;
 			}
 
-			syncFromEntity(dog, level.registryAccess());
 			Pending pending = PENDING.computeIfAbsent(dog.getUUID(), k -> new Pending());
 			collectLoot(level, victim, pending);
 			pending.xp += 1 + dog.getRandom().nextInt(3);
@@ -182,59 +148,21 @@ public class PerroCazadorMod implements ModInitializer {
 			if (pending.itemCount() >= MAX_CAPACITY) {
 				pending.returningToOwner = true;
 			}
-			syncToEntity(dog, pending, level.registryAccess());
 		});
 
+		// Al parar el servidor, cada perro suelta lo que lleva para no perder el botín.
 		ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
 			for (Map.Entry<UUID, Pending> entry : new ArrayList<>(PENDING.entrySet())) {
 				for (ServerLevel level : server.getAllLevels()) {
 					Entity entity = level.getEntity(entry.getKey());
 					if (entity instanceof Wolf dog) {
-						syncToEntity(dog, entry.getValue(), level.registryAccess());
+						dropPending(level, dog, entry.getValue(), null);
 						break;
 					}
 				}
 			}
 			PENDING.clear();
 		});
-	}
-
-	/** Vuelca el estado actual de la entidad a un CompoundTag (API ValueOutput de 1.21.6+). */
-	private static CompoundTag saveEntity(Wolf dog, HolderLookup.Provider registries) {
-		TagValueOutput output = TagValueOutput.createWithContext(ProblemReporter.DISCARDING, registries);
-		dog.saveWithoutId(output);
-		return output.buildResult();
-	}
-
-	/** Carga un CompoundTag en la entidad (API ValueInput de 1.21.6+). */
-	private static void loadEntity(Wolf dog, CompoundTag tag, HolderLookup.Provider registries) {
-		dog.load(TagValueInput.create(ProblemReporter.DISCARDING, registries, tag));
-	}
-
-	private static void syncFromEntity(Wolf dog, HolderLookup.Provider registries) {
-		CompoundTag tag = saveEntity(dog, registries);
-		Pending pending = Pending.loadFromNbt(tag, registries);
-		if (pending != null) {
-			PENDING.put(dog.getUUID(), pending);
-		} else {
-			PENDING.remove(dog.getUUID());
-		}
-	}
-
-	private static void syncToEntity(Wolf dog, Pending pending, HolderLookup.Provider registries) {
-		CompoundTag tag = saveEntity(dog, registries);
-		if (pending != null && !pending.items.isEmpty()) {
-			pending.saveToNbt(tag, registries);
-		} else {
-			tag.remove("PerroCazadorData");
-		}
-		loadEntity(dog, tag, registries);
-	}
-
-	private static void clearEntityNbt(Wolf dog, HolderLookup.Provider registries) {
-		CompoundTag tag = saveEntity(dog, registries);
-		tag.remove("PerroCazadorData");
-		loadEntity(dog, tag, registries);
 	}
 
 	private static void tickPlayerDogs(ServerPlayer player) {
@@ -251,18 +179,20 @@ public class PerroCazadorMod implements ModInitializer {
 		for (Mob dog : dogs) {
 			Wolf wolf = (Wolf) dog;
 			removeFollowOwnerGoal(wolf);
-			syncFromEntity(wolf, level.registryAccess());
 
 			Pending pending = PENDING.get(dog.getUUID());
 
 			if (wolf.isOrderedToSit()) {
+				if (playerHoldingBone) {
+					player.displayClientMessage(Component.literal(
+							"Tu perro cazador está sentado: haz clic derecho (sin hueso) para que se levante."), true);
+				}
 				continue;
 			}
 
 			if (playerHoldingBone || (pending != null && pending.returningToOwner)) {
 				if (pending != null && dog.distanceTo(player) <= DELIVER_DISTANCE) {
 					PENDING.remove(dog.getUUID());
-					clearEntityNbt(wolf, level.registryAccess());
 					dropPending(level, dog, pending, player);
 					player.displayClientMessage(Component.literal("Tu perro te ha entregado la carga."), true);
 				} else {
