@@ -22,7 +22,6 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.InteractionResult;
-import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.ExperienceOrb;
@@ -84,7 +83,7 @@ public class PerroCazadorMod implements ModInitializer {
 		final List<ItemStack> items = new ArrayList<>();
 		int xp;
 		boolean delivering;
-		int deliverTicks = 0; // NUEVO: Para evitar que se quede atascado entregando
+		int deliverTicks = 0;
 
 		boolean has(Item item) {
 			for (ItemStack stack : items) {
@@ -168,14 +167,14 @@ public class PerroCazadorMod implements ModInitializer {
 			return InteractionResult.PASS;
 		});
 
-		// Bloquear daño a mobs que no sean presas
+		// El perro cazador no puede dañar a mobs que no estén en su lista de presas
 		ServerLivingEntityEvents.ALLOW_DAMAGE.register((entity, source, amount) -> {
 			Entity attacker = source.getEntity();
 			if (attacker instanceof TamableAnimal dog && dog.getTags().contains(HUNTER_TAG)) {
 				if (entity instanceof LivingEntity livingVictim) {
 					Mission mission = MISSIONS.get(dog.getUUID());
 					if (!isHuntTarget(livingVictim, mission)) {
-						return false; // El perro NO puede hacer daño a esqueletos, zombis, etc.
+						return false;
 					}
 				}
 			}
@@ -261,6 +260,12 @@ public class PerroCazadorMod implements ModInitializer {
 		return PREY.contains(e.getType());
 	}
 
+	// Método público para que el Mixin (WolfMixin) pueda comprobar si el objetivo es válido
+	public static boolean isHuntTargetStatic(LivingEntity e, UUID dogId) {
+		Mission mission = MISSIONS.get(dogId);
+		return isHuntTarget(e, mission);
+	}
+
 	private static void tickPlayer(ServerPlayer player) {
 		ServerLevel level = (ServerLevel) player.level();
 		List<Mob> dogs = level.getEntitiesOfClass(Mob.class,
@@ -292,6 +297,9 @@ public class PerroCazadorMod implements ModInitializer {
 		TamableAnimal tamable = (TamableAnimal) dog;
 		UUID id = dog.getUUID();
 
+		// 1. ACTUALIZAR EL HUD SIEMPRE (Vida y posición exactas al instante)
+		updateDogInfo(dog, player);
+
 		AttributeInstance range = dog.getAttribute(Attributes.FOLLOW_RANGE);
 		if (range != null && range.getBaseValue() < FOLLOW_RANGE) {
 			range.setBaseValue(FOLLOW_RANGE);
@@ -305,7 +313,7 @@ public class PerroCazadorMod implements ModInitializer {
 				PENDING.remove(id);
 				dropPending(level, dog, pending, player);
 			}
-			report(dog, player, "Sentado");
+			setActivity(dog, "Sentado");
 			return;
 		}
 
@@ -317,35 +325,38 @@ public class PerroCazadorMod implements ModInitializer {
 		double dist = dog.distanceTo(player);
 
 		if (pending != null && pending.delivering) {
-			pending.deliverTicks++; // Aumentar el tiempo intentando entregar
-			// Si llega al jugador O si se atasca más de 30 segundos (600 ticks), suelta el objeto
+			pending.deliverTicks++;
+			// Si llega al jugador o pasan 30 segundos atascado, suelta el objeto
 			if (dist < DELIVER_DISTANCE || pending.deliverTicks > 600) {
 				PENDING.remove(id);
 				dropPending(level, dog, pending, player);
-				report(dog, player, "Botin entregado");
+				setActivity(dog, "Botin entregado");
 			} else {
 				dog.setTarget(null);
 				dog.getNavigation().moveTo(player, 1.3);
-				report(dog, player, "Trayendote el botin");
+				setActivity(dog, "Trayendote el botin");
 			}
 			return;
 		}
 
-		// Si tiene un objetivo inválido (esqueleto, zombi), lo borramos INMEDIATAMENTE sin congelar al perro
+		// 2. LÓGICA DE OBJETIVOS
 		if (dog.getTarget() != null && dog.getTarget().isAlive()) {
 			if (!isHuntTarget(dog.getTarget(), mission)) {
+				// Si es un esqueleto, zombi, etc., borramos el objetivo y el rencor de la IA vanilla
 				dog.setTarget(null);
+				dog.setLastHurtByMob(null); 
 			} else {
-				report(dog, player, mission != null ? "Cazando (mision: " + mission.label + ")" : "Cazando");
+				setActivity(dog, mission != null ? "Cazando (mision: " + mission.label + ")" : "Cazando");
 				return;
 			}
 		}
 
 		if (dog.getHealth() < dog.getMaxHealth() * 0.4f) {
-			report(dog, player, "Descansando (herido)");
+			setActivity(dog, "Descansando (herido)");
 			return;
 		}
 
+		// 3. BUSCAR NUEVAS PRESAS
 		Mob prey = level.getEntitiesOfClass(Mob.class,
 				player.getBoundingBox().inflate(HUNT_RADIUS),
 				e -> isHuntTarget(e, mission)
@@ -360,19 +371,20 @@ public class PerroCazadorMod implements ModInitializer {
 
 		if (prey != null) {
 			dog.setTarget(prey);
-			report(dog, player, mission != null ? "Cazando (mision: " + mission.label + ")" : "Cazando");
+			setActivity(dog, mission != null ? "Cazando (mision: " + mission.label + ")" : "Cazando");
 		} else if (mission != null) {
 			MISSIONS.remove(id);
 			player.displayClientMessage(Component.literal(
 					"No hay " + mission.label + " cerca (" + (int) HUNT_RADIUS
 							+ " bloques). Mision cancelada."), true);
-			report(dog, player, "Siguiendote");
+			setActivity(dog, "Siguiendote");
 		} else {
-			report(dog, player, "Siguiendote");
+			setActivity(dog, "Siguiendote");
 		}
 	}
 
-	private static void report(Mob dog, ServerPlayer player, String activity) {
+	// Actualiza la vida y posición constantemente
+	private static void updateDogInfo(Mob dog, ServerPlayer player) {
 		DogInfo info = STATUS.computeIfAbsent(dog.getUUID(), k -> new DogInfo(player.getUUID()));
 		info.state = DogsPayload.ALIVE;
 		info.name = dog.hasCustomName() ? dog.getName().getString() : "Perro";
@@ -382,7 +394,14 @@ public class PerroCazadorMod implements ModInitializer {
 		info.health = dog.getHealth();
 		info.maxHealth = dog.getMaxHealth();
 		info.dim = dog.level().dimension().toString();
-		info.activity = activity;
+	}
+
+	// Cambia solo el texto de estado (Cazando, Sentado, etc.)
+	private static void setActivity(Mob dog, String activity) {
+		DogInfo info = STATUS.get(dog.getUUID());
+		if (info != null) {
+			info.activity = activity;
+		}
 	}
 
 	private static void sendStatus(ServerPlayer player) {
