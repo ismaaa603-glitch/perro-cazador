@@ -22,8 +22,8 @@ public abstract class WolfMixin {
                 && tamable.getType() == EntityType.WOLF 
                 && self.getTags().contains(PerroCazadorMod.HUNTER_TAG)) {
             
-            // Si el objetivo no es válido, bloqueamos la orden
-            if (target != null && !PerroCazadorMod.isHuntTargetStatic(target, self.getUUID())) {
+            // Si el objetivo no es válido (o está bajo tierra / descartado), bloqueamos la orden
+            if (target != null && !PerroCazadorMod.canTargetStatic(target, self.getUUID())) {
                 ci.cancel();
             }
         }

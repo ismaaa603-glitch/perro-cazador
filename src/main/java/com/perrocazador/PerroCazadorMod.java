@@ -37,6 +37,8 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.Vec3;
 
 public class PerroCazadorMod implements ModInitializer {
@@ -52,6 +54,13 @@ public class PerroCazadorMod implements ModInitializer {
     private static final double FOLLOW_RANGE = 160.0;
     private static final double DELIVER_DISTANCE = 3.0;
     private static final double MAX_Y_DIFF = 4.0;
+    /** Bloques por debajo de la superficie a partir de los cuales una presa se considera "en una cueva". */
+    private static final int UNDERGROUND_DEPTH = 3;
+    /** Ticks sin acercarse a la presa antes de rendirse (5 s). */
+    private static final int STUCK_TICKS = 100;
+    /** Ticks que se ignora una presa inalcanzable (30 s). */
+    private static final int IGNORE_TICKS = 600;
+    private static final int MAX_PATH_CHECKS = 4;
 
     private enum Mission {
         ENDERMAN(EntityType.ENDERMAN, Items.ENDER_PEARL, Items.ENDER_PEARL, "endermans"),
@@ -113,6 +122,22 @@ public class PerroCazadorMod implements ModInitializer {
 
     private record TicketData(ServerLevel level, ChunkPos pos) {}
 
+    private static final class HuntProgress {
+        final UUID targetId;
+        double bestDistSqr;
+        long lastImprovementTick;
+
+        HuntProgress(UUID targetId, double distSqr, long tick) {
+            this.targetId = targetId;
+            this.bestDistSqr = distSqr;
+            this.lastImprovementTick = tick;
+        }
+    }
+
+    /** Presas descartadas por perro: UUID presa -> tick de juego en que vuelve a ser valida. */
+    private static final Map<UUID, Map<UUID, Long>> IGNORED = new HashMap<>();
+    private static final Map<UUID, HuntProgress> PROGRESS = new HashMap<>();
+
     private static final Map<UUID, Pending> PENDING = new HashMap<>();
     private static final Map<UUID, Mission> MISSIONS = new HashMap<>();
     private static final Map<UUID, DogInfo> STATUS = new HashMap<>();
@@ -163,6 +188,7 @@ public class PerroCazadorMod implements ModInitializer {
                         MISSIONS.remove(id);
                         STATUS.remove(id);
                         RECALLING.remove(id);
+                        clearDogState(id);
                         removeTicket(id);
                         Pending carried = PENDING.remove(id);
                         if (carried != null && level instanceof ServerLevel serverLevel) {
@@ -234,6 +260,7 @@ public class PerroCazadorMod implements ModInitializer {
                 STATUS.remove(victimId);
                 MISSIONS.remove(victimId);
                 RECALLING.remove(victimId);
+                clearDogState(victimId);
                 removeTicket(victimId);
             }
 
@@ -285,6 +312,8 @@ public class PerroCazadorMod implements ModInitializer {
             STATUS.clear();
             HUD_ACTIVE.clear();
             RECALLING.clear();
+            IGNORED.clear();
+            PROGRESS.clear();
         });
     }
 
@@ -305,6 +334,74 @@ public class PerroCazadorMod implements ModInitializer {
     public static boolean isHuntTargetStatic(LivingEntity e, UUID dogId) {
         Mission mission = MISSIONS.get(dogId);
         return isHuntTarget(e, mission);
+    }
+
+    /** Usado por el mixin de setTarget: ademas de ser presa valida, no puede estar bajo tierra ni descartada. */
+    public static boolean canTargetStatic(LivingEntity e, UUID dogId) {
+        if (!isHuntTargetStatic(e, dogId)) {
+            return false;
+        }
+        if (isUnderground(e) || isIgnored(dogId, e.getUUID(), e.level().getGameTime())) {
+            return false;
+        }
+        return true;
+    }
+
+    /** True si la entidad esta en una cueva: sin cielo encima y claramente por debajo de la superficie. */
+    private static boolean isUnderground(Entity e) {
+        if (!(e.level() instanceof ServerLevel level)) {
+            return false;
+        }
+        BlockPos pos = e.blockPosition();
+        if (level.canSeeSky(pos)) {
+            return false;
+        }
+        int surface = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, pos.getX(), pos.getZ());
+        return pos.getY() < surface - UNDERGROUND_DEPTH;
+    }
+
+    private static boolean isIgnored(UUID dogId, UUID preyId, long now) {
+        Map<UUID, Long> map = IGNORED.get(dogId);
+        if (map == null) {
+            return false;
+        }
+        Long until = map.get(preyId);
+        if (until == null) {
+            return false;
+        }
+        if (now >= until) {
+            map.remove(preyId);
+            return false;
+        }
+        return true;
+    }
+
+    private static void ignorePrey(Mob dog, LivingEntity prey) {
+        long now = dog.level().getGameTime();
+        Map<UUID, Long> map = IGNORED.computeIfAbsent(dog.getUUID(), k -> new HashMap<>());
+        map.values().removeIf(until -> until <= now);
+        map.put(prey.getUUID(), now + IGNORE_TICKS);
+        PROGRESS.remove(dog.getUUID());
+    }
+
+    private static void giveUpTarget(Mob dog, LivingEntity prey, ServerPlayer player) {
+        ignorePrey(dog, prey);
+        dog.setTarget(null);
+        dog.setLastHurtByMob(null);
+        dog.getNavigation().stop();
+        if (dog.distanceTo(player) > 10.0) {
+            dog.getNavigation().moveTo(player, 1.2);
+        }
+    }
+
+    private static boolean canReach(Mob dog, Mob prey) {
+        Path path = dog.getNavigation().createPath(prey, 0);
+        return path != null && path.canReach();
+    }
+
+    private static void clearDogState(UUID id) {
+        IGNORED.remove(id);
+        PROGRESS.remove(id);
     }
 
     private static void tickPlayerAI(ServerPlayer player) {
@@ -451,15 +548,35 @@ public class PerroCazadorMod implements ModInitializer {
         }
 
         if (dog.getTarget() != null && dog.getTarget().isAlive()) {
-            if (Math.abs(dog.getTarget().getY() - dog.getY()) > MAX_Y_DIFF) {
+            LivingEntity current = dog.getTarget();
+            long now = level.getGameTime();
+            if (Math.abs(current.getY() - dog.getY()) > MAX_Y_DIFF) {
+                giveUpTarget(dog, current, player);
+            } else if (!isHuntTarget(current, mission)) {
                 dog.setTarget(null);
                 dog.setLastHurtByMob(null);
-            } else if (!isHuntTarget(dog.getTarget(), mission)) {
-                dog.setTarget(null);
-                dog.setLastHurtByMob(null);
+                PROGRESS.remove(id);
+            } else if (isUnderground(current)) {
+                // La presa esta en una cueva: no la perseguimos.
+                giveUpTarget(dog, current, player);
             } else {
-                setActivity(dog, mission != null ? "Cazando (mision: " + mission.label + ")" : "Cazando");
-                return;
+                // Si el perro lleva un rato sin acercarse (cueva, hueco, pared...), se rinde.
+                double distSqr = dog.distanceToSqr(current);
+                HuntProgress progress = PROGRESS.get(id);
+                if (progress == null || !progress.targetId.equals(current.getUUID())) {
+                    PROGRESS.put(id, new HuntProgress(current.getUUID(), distSqr, now));
+                } else if (distSqr < progress.bestDistSqr - 1.0) {
+                    progress.bestDistSqr = distSqr;
+                    progress.lastImprovementTick = now;
+                } else if (now - progress.lastImprovementTick > STUCK_TICKS && distSqr > 9.0) {
+                    giveUpTarget(dog, current, player);
+                    setActivity(dog, "Siguiendote (presa inaccesible)");
+                    return;
+                }
+                if (dog.getTarget() != null) {
+                    setActivity(dog, mission != null ? "Cazando (mision: " + mission.label + ")" : "Cazando");
+                    return;
+                }
             }
         }
 
@@ -471,7 +588,8 @@ public class PerroCazadorMod implements ModInitializer {
             return;
         }
 
-        Mob prey = level.getEntitiesOfClass(Mob.class,
+        long gameTime = level.getGameTime();
+        List<Mob> candidates = level.getEntitiesOfClass(Mob.class,
                 player.getBoundingBox().inflate(HUNT_RADIUS),
                 e -> isHuntTarget(e, mission)
                         && e.isAlive()
@@ -479,10 +597,26 @@ public class PerroCazadorMod implements ModInitializer {
                         && !e.hasCustomName()
                         && e != dog
                         && e.distanceTo(player) <= HUNT_RADIUS
-                        && Math.abs(e.getY() - dog.getY()) <= MAX_Y_DIFF)
+                        && Math.abs(e.getY() - dog.getY()) <= MAX_Y_DIFF
+                        && !isUnderground(e)
+                        && !isIgnored(id, e.getUUID(), gameTime))
                 .stream()
-                .min(Comparator.comparingDouble(e -> e.distanceToSqr(dog)))
-                .orElse(null);
+                .sorted(Comparator.comparingDouble(e -> e.distanceToSqr(dog)))
+                .toList();
+
+        // Solo se elige una presa con camino real hasta ella (se comprueban las mas cercanas).
+        Mob prey = null;
+        int checks = 0;
+        for (Mob candidate : candidates) {
+            if (checks++ >= MAX_PATH_CHECKS) {
+                break;
+            }
+            if (canReach(dog, candidate)) {
+                prey = candidate;
+                break;
+            }
+            ignorePrey(dog, candidate);
+        }
 
         if (prey != null) {
             dog.setTarget(prey);
