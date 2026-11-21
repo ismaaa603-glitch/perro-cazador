@@ -54,8 +54,11 @@ public class PerroCazadorMod implements ModInitializer {
     private static final double FOLLOW_RANGE = 160.0;
     private static final double DELIVER_DISTANCE = 3.0;
     private static final double MAX_Y_DIFF = 4.0;
-    /** Bloques por debajo de la superficie a partir de los cuales una presa se considera "en una cueva". */
-    private static final int UNDERGROUND_DEPTH = 3;
+    /**
+     * Bloques por debajo de la superficie a partir de los cuales una presa se considera "en una cueva".
+     * Con valores bajos, graneros o corrales con techo cuentan como cueva, por eso es 6.
+     */
+    private static final int UNDERGROUND_DEPTH = 6;
     /** Ticks sin acercarse a la presa antes de rendirse (5 s). */
     private static final int STUCK_TICKS = 100;
     /** Ticks que se ignora una presa inalcanzable (30 s). */
